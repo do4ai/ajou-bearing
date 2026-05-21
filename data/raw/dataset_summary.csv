@@ -1,0 +1,7 @@
+name,fault_mode,lifetime_h,eol_seconds,n_measurements,fpt_index
+Train1,wideband,21.0,61800.0,104,31
+Train2,surface,19.0,56400.0,95,28
+Train3,cage,15.0,45000.0,76,22
+Train4,sudden,23.0,65400.0,110,33
+Val1,wideband,18.0,38880.0,65,19
+Val2,cage,20.0,36000.0,60,18
