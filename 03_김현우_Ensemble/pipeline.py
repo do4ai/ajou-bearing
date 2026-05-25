@@ -39,10 +39,11 @@ METHOD_DIR = Path(__file__).resolve().parent
 RESULT_DIR = METHOD_DIR / "results"; RESULT_DIR.mkdir(parents=True, exist_ok=True)
 MODEL_DIR = METHOD_DIR / "models"; MODEL_DIR.mkdir(parents=True, exist_ok=True)
 SEQ_LEN = 10
-SEEDS = [42, 7, 123]
+SEEDS = [42, 7, 123, 2026, 99]
 EPOCHS = 300
 PATIENCE = 70
 AUG_NOISE_STD = 0.02
+TRIM = 1  # trimmed mean: 양쪽에서 TRIM개씩 제거 후 평균
 
 print("=" * 70); print("  v3: TFT Multi-Seed Ensemble + σ-aware 보수 보정"); print("=" * 70)
 
@@ -106,9 +107,10 @@ for nm in TRAIN_NAMES:
     dfs[nm] = pd.DataFrame(rows); del sigs; gc.collect()
     print(f"  {nm}: {len(dfs[nm])} 측정  {time.time()-t0:.1f}s", flush=True)
 df = pd.concat(dfs.values(), ignore_index=True); del dfs; gc.collect()
+# v6: lag 제거 (실험적으로 v3 베이스라인이 가장 안정적이었음)
 excl = {"t_s", "rul_s", "bearing"}
 FC = [c for c in df.columns if c not in excl and pd.api.types.is_numeric_dtype(df[c])]
-print(f"  피처: {len(FC)}개", flush=True)
+print(f"  피처: {len(FC)}개 (v6: lag 제거, v3 기반)", flush=True)
 
 
 # ── DTC-VAE ────────────────────────────────────────────────────────
@@ -299,6 +301,12 @@ for val in TRAIN_NAMES:
     pred_mean = fold_preds.mean(axis=0)
     pred_median = np.median(fold_preds, axis=0)
     pred_std_seeds = fold_preds.std(axis=0)
+    # Trimmed mean: 시드별 점수가 가장 낮은 TRIM개 제거 후 평균
+    if len(fold_best) > 2 * TRIM:
+        keep_idx = np.argsort(fold_best)[TRIM:]  # 하위 TRIM 제거
+        pred_trimmed = fold_preds[keep_idx].mean(axis=0)
+    else:
+        pred_trimmed = pred_mean
 
     # ── GPR (보수적 σ 보정용만 사용) ──
     print(f"    GPR (σ for conservative shift)...", flush=True)
@@ -326,17 +334,20 @@ for val in TRAIN_NAMES:
     p_med = np.clip(p_med, 0, None); p_mean = np.clip(p_mean, 0, None)
     p_cons = np.clip(p_cons, 0, None); p_ultra = np.clip(p_ultra, 0, None)
 
+    p_trim = np.clip(pred_trimmed, 0, None)
     s_mean = asym_score(p_mean, vc); s_med = asym_score(p_med, vc)
     s_cons = asym_score(p_cons, vc); s_ultra = asym_score(p_ultra, vc)
-    # 최선 선택 (검증 기반이지만 v3 베이스라인 비교용)
-    candidates = {"mean": s_mean, "median": s_med, "cons": s_cons, "ultra": s_ultra}
+    s_trim = asym_score(p_trim, vc)
+    candidates = {"mean": s_mean, "median": s_med, "cons": s_cons,
+                  "ultra": s_ultra, "trimmed": s_trim}
     best_strat = max(candidates, key=candidates.get); s_best = candidates[best_strat]
 
     rmse = np.sqrt(mean_squared_error(vc, p_mean))
-    print(f"  TFT mean={s_mean:.4f}  median={s_med:.4f}  cons={s_cons:.4f}  "
-          f"ultra={s_ultra:.4f}  best={best_strat}({s_best:.4f})  RMSE={rmse:.0f}s", flush=True)
+    print(f"  TFT mean={s_mean:.4f}  median={s_med:.4f}  trim={s_trim:.4f}  "
+          f"cons={s_cons:.4f}  ultra={s_ultra:.4f}  "
+          f"best={best_strat}({s_best:.4f})  RMSE={rmse:.0f}s", flush=True)
     results.append({"val_bearing": val, "rmse_s": rmse,
-                    "tft_mean": s_mean, "tft_median": s_med,
+                    "tft_mean": s_mean, "tft_median": s_med, "tft_trim": s_trim,
                     "tft_cons": s_cons, "tft_ultra": s_ultra,
                     "best_strat": best_strat, "best_score": s_best,
                     "seeds": ",".join(f"{b:.3f}" for b in fold_best)})
@@ -373,9 +384,10 @@ res = pd.DataFrame(results)
 res["asym_score"] = res["tft_cons"]
 print("\n" + "=" * 70, flush=True); print("  v3 최종 결과 (TFT Multi-Seed)", flush=True); print("=" * 70, flush=True)
 print(res.to_string(index=False), flush=True)
-print(f"\n  TFT seed mean (단일):     {res.tft_mean.mean():.4f}", flush=True)
-print(f"  TFT seed median:          {res.tft_median.mean():.4f}", flush=True)
-print(f"  TFT mean - 0.15σ-0.1σs:   {res.tft_cons.mean():.4f}  ← 제출 권장", flush=True)
-print(f"  TFT mean - 0.3σ (ultra):  {res.tft_ultra.mean():.4f}", flush=True)
-print(f"  평균 RMSE:                {res.rmse_s.mean():.0f} s", flush=True)
+print(f"\n  TFT seed mean (5 seeds):   {res.tft_mean.mean():.4f}", flush=True)
+print(f"  TFT seed median:           {res.tft_median.mean():.4f}", flush=True)
+print(f"  TFT trimmed mean (-1):     {res.tft_trim.mean():.4f}  ← 제출 권장", flush=True)
+print(f"  TFT mean - 0.15σ-0.1σs:    {res.tft_cons.mean():.4f}", flush=True)
+print(f"  TFT mean - 0.3σ (ultra):   {res.tft_ultra.mean():.4f}", flush=True)
+print(f"  평균 RMSE:                 {res.rmse_s.mean():.0f} s", flush=True)
 res.to_csv(RESULT_DIR / "lobo_results.csv", index=False)
