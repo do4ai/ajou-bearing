@@ -11,7 +11,7 @@ ROOT = Path(__file__).resolve().parent.parent
 DATA_DIR = ROOT / "data" / "raw"
 
 TRAIN_NAMES = ["Train1", "Train2", "Train3", "Train4"]
-VAL_NAMES   = ["Val1", "Val2"]
+VAL_NAMES   = ["Test1", "Test2", "Test3", "Test4", "Test5", "Test6"]
 FS = 25600
 ORDERS = {"BPFI": 8.40, "BPFO": 5.58, "BSF": 4.68, "FTF": 0.40}
 

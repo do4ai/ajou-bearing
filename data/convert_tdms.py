@@ -1,257 +1,191 @@
 """
-TDMS → numpy+CSV 변환 스크립트
-KIMM 베어링 열화시험 데이터 (KSPHM-KIMM 2026 챌린지)
+TDMS → numpy+CSV 변환 (KIMM 베어링 챌린지 실제 데이터)
 
-사용법:
-  python convert_tdms.py --input /path/to/extracted_zip --output ../raw
+데이터 구조:
+  download/extracted/
+    Train{n}_Vibration/000001.tdms ...  (Vibration 그룹 / CH1~CH4 / 1.5M sample × float32)
+    Train{n}_Operation.csv              (Time[sec], Torque, Motor speed, TC Front, TC Rear @ 10s)
+    Test{n}/000001.tdms ...             (Test는 운전조건 비공개)
 
-데이터 구조 (예상):
-  Train.zip → Train1/, Train2/, Train3/, Train4/
-  Test.zip  → Val1/, Val2/  (또는 Test1/, Test2/)
+샘플링:
+  - 진동 25.6kHz × 4채널, 60초/측정 (1,536,000 samples), 10분 주기
+  - 운전조건 0.1Hz
 
-각 베어링 폴더에 여러 TDMS 파일이 있을 수 있음.
-변환 후: data/raw/{Train1,...,Val2}/vibration.npy, operating.csv
+출력:
+  data/raw/{Train1..Train4, Test1..Test6}/
+    vibration.npy : [N, 4, SAMPLES_PER_FILE]  (기본 2초 다운샘플 = 51200)
+    operating.csv : t_seconds, rpm, torque, temp_front, temp_rear, rul_seconds
+
+사용:
+  python convert_tdms.py                       # 전체 변환
+  python convert_tdms.py --keep-tdms           # 변환 후 TDMS 보존 (기본은 삭제)
+  python convert_tdms.py --samples 102400      # 4초 윈도우로 변환
 """
 import os
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 
 import argparse
+import shutil
 import numpy as np
 import pandas as pd
 from pathlib import Path
 from nptdms import TdmsFile
-import re
+
+ROOT = Path(__file__).resolve().parent.parent
+SRC_DIR = ROOT / "download" / "extracted"
+OUT_DIR = ROOT / "data" / "raw"
+
+MEAS_INTERVAL = 600        # 10분 주기 (초)
+MEAS_LENGTH = 60           # 1분 취득 (초)
+FS = 25600                 # 25.6 kHz
+N_CHANNELS = 4
 
 
-def natural_sort_key(s):
-    return [int(c) if c.isdigit() else c.lower() for c in re.split(r'(\d+)', str(s))]
-
-
-def explore_tdms(tdms_path):
-    """TDMS 파일 구조 탐색 → 채널 목록과 메타데이터 반환"""
+def read_tdms_vibration(tdms_path, n_samples):
+    """TDMS → [4, n_samples] (앞 n_samples만 사용)"""
     tf = TdmsFile.read(tdms_path)
-    info = {}
-    for group in tf.groups():
-        gname = group.name
-        info[gname] = {}
-        for ch in group.channels():
-            cname = ch.name
-            data = ch.data
-            props = ch.properties
-            info[gname][cname] = {
-                "dtype": str(data.dtype) if len(data) > 0 else "empty",
-                "length": len(data),
-                "properties": {k: str(v) for k, v in props.items()},
-            }
-    return info
+    grp = tf["Vibration"]
+    chs = [f"CH{i}" for i in (1, 2, 3, 4)]
+    sigs = np.stack([np.asarray(grp[c].data[:n_samples], dtype=np.float32) for c in chs])
+    return sigs
 
 
-def read_tdms(tdms_path):
-    """TDMS 파일에서 진동+운전조건 데이터 추출"""
-    tf = TdmsFile.read(tdms_path)
-    signals = {}
-    operating = {}
-
-    for group in tf.groups():
-        for ch in group.channels():
-            name_lower = ch.name.lower()
-            data = ch.data
-
-            if len(data) == 0:
-                continue
-
-            # 진동 채널 감지 (길이가 긴 데이터)
-            if len(data) > 1000:
-                signals[ch.name] = data
-            # 운전조건 채널 감지 (RPM, Torque, Temp 등)
-            elif any(kw in name_lower for kw in ["rpm", "speed", "torque", "temp", "force", "load", "power"]):
-                operating[ch.name] = float(np.nanmean(data)) if len(data) > 0 else np.nan
-
-    return signals, operating
+def operation_for_measurement(op_df, t_start, t_end):
+    """[t_start, t_end] 구간의 운전조건 평균(없으면 가장 가까운 값)"""
+    sub = op_df[(op_df["Time[sec]"] >= t_start) & (op_df["Time[sec]"] <= t_end + 5)]
+    if len(sub) == 0:
+        # 가장 가까운 한 행
+        idx = (op_df["Time[sec]"] - t_start).abs().idxmin()
+        sub = op_df.iloc[[idx]]
+    return {
+        "rpm": float(sub.iloc[:, 2].mean()),
+        "torque": float(sub.iloc[:, 1].mean()),
+        "temp_front": float(sub.iloc[:, 3].mean()),
+        "temp_rear": float(sub.iloc[:, 4].mean()),
+    }
 
 
-def convert_bearing(bearing_dir, output_dir, bearing_name):
-    """단일 베어링의 TDMS 파일들을 변환"""
-    tdms_files = sorted(Path(bearing_dir).glob("**/*.tdms"), key=lambda p: natural_sort_key(str(p)))
-
+def convert_train(name, src_dir, op_csv, out_dir, n_samples):
+    tdms_files = sorted(src_dir.glob("*.tdms"))
     if not tdms_files:
-        print(f"  ⚠ {bearing_name}: TDMS 파일 없음 in {bearing_dir}")
+        print(f"  ✗ {name}: TDMS 파일 없음")
         return False
+    N = len(tdms_files)
+    print(f"  {name}: {N} measurements, sampling 0~{n_samples/FS:.2f}s of each {MEAS_LENGTH}s capture")
 
-    print(f"  {bearing_name}: {len(tdms_files)}개 TDMS 파일")
+    try:
+        op_df = pd.read_csv(op_csv, encoding="cp949")
+    except UnicodeDecodeError:
+        op_df = pd.read_csv(op_csv, encoding="latin-1")
+    op_df.columns = [c.strip() for c in op_df.columns]
+    # 컬럼명이 깨질 수 있어 인덱스 기반 접근
+    op_df.rename(columns={op_df.columns[0]: "Time[sec]"}, inplace=True)
 
-    # 첫 번째 파일로 구조 탐색
-    if len(tdms_files) <= 3:
-        for f in tdms_files[:3]:
-            info = explore_tdms(f)
-            print(f"\n  구조 ({f.name}):")
-            for gname, channels in info.items():
-                print(f"    Group: {gname}")
-                for cname, meta in channels.items():
-                    print(f"      {cname}: len={meta['length']}, dtype={meta['dtype']}")
-                    if meta['properties']:
-                        for pk, pv in list(meta['properties'].items())[:5]:
-                            print(f"        {pk}={pv}")
-    else:
-        info = explore_tdms(tdms_files[0])
-        print(f"\n  구조 예시 ({tdms_files[0].name}):")
-        for gname, channels in info.items():
-            print(f"    Group: {gname}")
-            for cname, meta in channels.items():
-                print(f"      {cname}: len={meta['length']}, dtype={meta['dtype']}")
+    sigs = np.empty((N, N_CHANNELS, n_samples), dtype=np.float32)
+    rows = []
+    for i, tdms in enumerate(tdms_files):
+        sigs[i] = read_tdms_vibration(tdms, n_samples)
+        t_start = i * MEAS_INTERVAL
+        op = operation_for_measurement(op_df, t_start, t_start + MEAS_LENGTH)
+        rows.append({
+            "measurement": i,
+            "t_seconds": float(t_start),
+            "rul_seconds": float((N - i) * MEAS_INTERVAL),
+            **op,
+        })
+        if (i + 1) % 25 == 0 or i == N - 1:
+            print(f"    {i+1}/{N}", flush=True)
 
-    all_signals = []
-    all_operating = []
-
-    for i, tdms_path in enumerate(tdms_files):
-        signals, operating = read_tdms(tdms_path)
-
-        if not signals:
-            continue
-
-        # 진동 데이터를 [4, samples] 형태로 구성
-        sig_keys = sorted(signals.keys())
-        sig_array = np.array([signals[k] for k in sig_keys], dtype=np.float32)
-
-        # 채널 수가 다르면 최대 4채널로 맞춤
-        if sig_array.shape[0] > 4:
-            sig_array = sig_array[:4]
-        elif sig_array.shape[0] < 4:
-            pad = np.zeros((4 - sig_array.shape[0], sig_array.shape[1]), dtype=np.float32)
-            sig_array = np.vstack([sig_array, pad])
-
-        all_signals.append(sig_array)
-
-        # 운전조건 수집
-        op = {"measurement": i}
-        op.update(operating)
-        all_operating.append(op)
-
-        if (i + 1) % 50 == 0:
-            print(f"    ... {i+1}/{len(tdms_files)}")
-
-    if not all_signals:
-        print(f"  ⚠ {bearing_name}: 변환할 데이터 없음")
-        return False
-
-    # signals: [N, 4, S] 형태
-    sigs_np = np.array(all_signals, dtype=np.float32)
-    print(f"  진동 shape: {sigs_np.shape}")
-
-    # operating DataFrame
-    op_df = pd.DataFrame(all_operating)
-
-    # 컬럼명 표준화
-    col_map = {}
-    for c in op_df.columns:
-        cl = c.lower()
-        if "rpm" in cl or "speed" in cl:
-            col_map[c] = "rpm"
-        elif "torque" in cl or "force" in cl:
-            col_map[c] = "torque"
-        elif "front" in cl or "out" in cl or "outer" in cl:
-            col_map[c] = "temp_front"
-        elif "rear" in cl or "in" in cl or "inner" in cl:
-            col_map[c] = "temp_rear"
-    op_df = op_df.rename(columns=col_map)
-
-    # 시간 정보 계산 (10분 간격, 1분 취득)
-    n = len(op_df)
-    interval = 600  # 10분 = 600초
-    op_df["t_seconds"] = np.arange(n) * interval
-    op_df["t_seconds"] = op_df["t_seconds"].astype(float)
-
-    # EOL 시간 (마지막 측정 + interval)
-    eol = op_df["t_seconds"].iloc[-1] + interval
-
-    # RUL 계산
-    op_df["rul_seconds"] = (eol - op_df["t_seconds"]).astype(float)
-    op_df["rul_seconds"] = op_df["rul_seconds"].clip(lower=0)
-
-    # 저장
-    out_path = Path(output_dir) / bearing_name
+    op_out = pd.DataFrame(rows)
+    out_path = out_dir / name
     out_path.mkdir(parents=True, exist_ok=True)
+    np.save(out_path / "vibration.npy", sigs)
+    op_out.to_csv(out_path / "operating.csv", index=False)
+    print(f"    → {out_path}/  vibration.npy {sigs.shape} ({sigs.nbytes/1e6:.1f}MB), operating.csv {len(op_out)} rows")
+    return True
 
-    np.save(out_path / "vibration.npy", sigs_np)
-    op_df.to_csv(out_path / "operating.csv", index=False)
 
-    print(f"  저장: {out_path}/")
-    print(f"    vibration.npy: {sigs_np.shape} ({sigs_np.nbytes / 1e6:.1f} MB)")
-    print(f"    operating.csv: {len(op_df)} rows, 컬럼={list(op_df.columns)}")
+def convert_test(name, src_dir, out_dir, n_samples):
+    tdms_files = sorted(src_dir.glob("*.tdms"))
+    if not tdms_files:
+        print(f"  ✗ {name}: TDMS 파일 없음")
+        return False
+    N = len(tdms_files)
+    print(f"  {name}: {N} measurements (Test, no operation data)")
+
+    sigs = np.empty((N, N_CHANNELS, n_samples), dtype=np.float32)
+    rows = []
+    for i, tdms in enumerate(tdms_files):
+        sigs[i] = read_tdms_vibration(tdms, n_samples)
+        t_start = i * MEAS_INTERVAL
+        rows.append({
+            "measurement": i,
+            "t_seconds": float(t_start),
+            "rul_seconds": float("nan"),
+            "rpm": float("nan"),
+            "torque": float("nan"),
+            "temp_front": float("nan"),
+            "temp_rear": float("nan"),
+        })
+
+    op_out = pd.DataFrame(rows)
+    out_path = out_dir / name
+    out_path.mkdir(parents=True, exist_ok=True)
+    np.save(out_path / "vibration.npy", sigs)
+    op_out.to_csv(out_path / "operating.csv", index=False)
+    print(f"    → {out_path}/  vibration.npy {sigs.shape} ({sigs.nbytes/1e6:.1f}MB)")
     return True
 
 
 def main():
-    parser = argparse.ArgumentParser(description="TDMS → numpy+CSV 변환")
-    parser.add_argument("--input", required=True, help="압축 해제된 데이터 폴더 경로")
-    parser.add_argument("--output", default=None, help="출력 경로 (기본: data/raw/)")
-    parser.add_argument("--explore", action="store_true", help="TDMS 구조만 탐색")
-    args = parser.parse_args()
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--src", default=str(SRC_DIR), help="압축 해제된 폴더")
+    ap.add_argument("--out", default=str(OUT_DIR), help="출력 폴더")
+    ap.add_argument("--samples", type=int, default=51200,
+                    help="측정 1회당 추출 sample 수 (기본 2초=51200)")
+    ap.add_argument("--keep-tdms", action="store_true",
+                    help="변환 후 원본 TDMS 폴더 보존 (기본은 삭제로 디스크 절약)")
+    ap.add_argument("--only", default="", help="콤마구분: Train1,Test3 처럼 일부만")
+    args = ap.parse_args()
 
-    input_path = Path(args.input)
-    output_path = Path(args.output) if args.output else Path(__file__).parent / "raw"
+    src = Path(args.src)
+    out = Path(args.out)
+    only = set([s.strip() for s in args.only.split(",") if s.strip()])
 
-    if args.explore:
-        tdms_files = sorted(input_path.glob("**/*.tdms"), key=lambda p: natural_sort_key(str(p)))
-        if not tdms_files:
-            print(f"TDMS 파일 없음 in {input_path}")
-            return
-        print(f"TDMS 파일 {len(tdms_files)}개 발견")
-        for f in tdms_files[:3]:
-            print(f"\n{'='*60}")
-            print(f"파일: {f.name}")
-            info = explore_tdms(f)
-            for gname, channels in info.items():
-                print(f"  Group: {gname}")
-                for cname, meta in channels.items():
-                    props_str = ", ".join(f"{k}={v}" for k, v in list(meta['properties'].items())[:3])
-                    print(f"    {cname}: len={meta['length']}, dtype={meta['dtype']}, props=[{props_str}]")
-        return
+    print(f"src={src}  out={out}  samples={args.samples}  keep-tdms={args.keep_tdms}")
+    print(f"{'='*65}")
 
-    # 베어링 폴더 자동 감지
-    bearing_dirs = {}
-    for pattern in ["Train*", "train*", "Val*", "val*", "Test*", "test*"]:
-        for d in sorted(input_path.glob(pattern), key=lambda p: natural_sort_key(str(p))):
-            if d.is_dir():
-                name = d.name
-                # 표준 이름으로 변환
-                if name.lower().startswith("train"):
-                    num = re.search(r'\d+', name)
-                    bearing_dirs[f"Train{num.group()}" if num else name] = d
-                elif name.lower().startswith("val"):
-                    num = re.search(r'\d+', name)
-                    bearing_dirs[f"Val{num.group()}" if num else name] = d
-                elif name.lower().startswith("test"):
-                    num = re.search(r'\d+', name)
-                    bearing_dirs[f"Val{num.group()}" if num else name] = d
+    # Train1~4
+    for n in (1, 2, 3, 4):
+        name = f"Train{n}"
+        if only and name not in only:
+            continue
+        src_dir = src / f"Train{n}_Vibration"
+        op_csv = src / f"Train{n}_Operation.csv"
+        if not src_dir.exists():
+            print(f"  ✗ {name}: {src_dir} 없음")
+            continue
+        ok = convert_train(name, src_dir, op_csv, out, args.samples)
+        if ok and not args.keep_tdms:
+            shutil.rmtree(src_dir)
+            op_csv.unlink(missing_ok=True)
+            print(f"    (정리: {src_dir.name} 삭제)")
 
-    # 하위 폴더에 TDMS가 있으면 포함
-    if not bearing_dirs:
-        # 직접 TDMS 파일이 있는지 확인
-        tdms_files = list(input_path.glob("*.tdms"))
-        if tdms_files:
-            bearing_dirs[input_path.name] = input_path
+    # Test1~6
+    for n in (1, 2, 3, 4, 5, 6):
+        name = f"Test{n}"
+        if only and name not in only:
+            continue
+        src_dir = src / f"Test{n}"
+        if not src_dir.exists():
+            print(f"  ✗ {name}: {src_dir} 없음")
+            continue
+        ok = convert_test(name, src_dir, out, args.samples)
+        if ok and not args.keep_tdms:
+            shutil.rmtree(src_dir)
+            print(f"    (정리: {src_dir.name} 삭제)")
 
-    if not bearing_dirs:
-        # 더 깊이 탐색
-        for d in sorted(input_path.iterdir()):
-            if d.is_dir():
-                tdms_in = list(d.glob("**/*.tdms"))
-                if tdms_in:
-                    bearing_dirs[d.name] = d
-
-    print(f"베어링 폴더 {len(bearing_dirs)}개: {list(bearing_dirs.keys())}")
-
-    success = 0
-    for name, dir_path in bearing_dirs.items():
-        print(f"\n{'='*60}")
-        print(f"변환: {name} ({dir_path})")
-        if convert_bearing(dir_path, output_path, name):
-            success += 1
-
-    print(f"\n{'='*60}")
-    print(f"완료: {success}/{len(bearing_dirs)} 베어링 변환 성공")
-    print(f"출력: {output_path}")
+    print(f"\n{'='*65}\n완료. 출력: {out}")
 
 
 if __name__ == "__main__":

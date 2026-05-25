@@ -25,7 +25,7 @@ KSPHM-KIMM 2026 기계 데이터 챌린지 — NSK 30306 테이퍼 롤러 베어
 │   ├── pipeline.py
 │   ├── models/
 │   └── results/
-├── 03_교수설계_Ensemble/        # Fast Kurtogram + DTC-VAE + XGB+LSTM+GPR 앙상블
+├── 03_김현우_Ensemble/          # Fast Kurtogram + DTC-VAE + XGB+LSTM+GPR 앙상블
 │   ├── pipeline.py
 │   ├── models/
 │   └── results/
@@ -46,34 +46,61 @@ KSPHM-KIMM 2026 기계 데이터 챌린지 — NSK 30306 테이퍼 롤러 베어
 - STFT Spectrogram (32x32) → Baseline 차감
 - 2D CNN 인코더 + LSTM + Attention (SEQ=8)
 
-### 3. 교수설계 — Fast Kurtogram + DTC-VAE + 앙상블
+### 3. 김현우 — Fast Kurtogram + DTC-VAE + 앙상블
 - Fast Kurtogram → 최적 대역 필터링 → Order 에너지 피처
 - DTC-VAE로 단조 증가 Health Indicator 학습
 - CUSUM 기반 FPT 탐지 → 가중 RUL 타겟
 - XGBoost + LSTM + GPR 앙상블 (점수 기반 가중치)
 
-## 현재 성능 (합성 데이터, LOBO)
+## 현재 성능 (실제 KIMM 데이터, LOBO)
 
-| 방법론 | 평균 RMSE (s) | 평균 AsymScore |
-|--------|--------------|----------------|
-| 경민팀 OrderTracking | ~8,800 | **0.72** |
-| 태환팀 SpectrogramCNN | ~10,300 | **0.63** |
-| 교수설계 Ensemble | ~7,500 | **0.55** |
+### 베어링별 AsymScore
+
+| 베어링  | 01 경민(OrderTracking) | 02 태환(SpectrogramCNN) | 03 김현우(Ensemble) |
+|---------|:--------------------:|:--------------------:|:-----------------:|
+| Train1  | 0.4433              | **0.5191**           | 0.3697            |
+| Train2  | **0.5414**          | 0.4552               | 0.5116            |
+| Train3  | 0.4066              | 0.2712               | **0.4584**        |
+| Train4  | 0.4245              | **0.4421**           | 0.3953            |
+
+### 종합
+
+| 방법론                      | 평균 RMSE (s) | 평균 AsymScore |
+|----------------------------|--------------:|---------------:|
+| 01 경민팀 OrderTracking    | 18,520        | **0.4540** 🏆  |
+| 02 태환팀 SpectrogramCNN   | 22,184        | 0.4219         |
+| 03 김현우 Ensemble         | **14,192** 🏆 | 0.4337         |
+
+> 01 경민팀이 평균 AsymScore 최고, 03 김현우 앙상블이 평균 RMSE 최저.
+> 베어링별로 우월 모델이 다르므로 앙상블/스태킹 여지 있음.
+
+### 데이터 통계 (실제)
+
+| 베어링  | 측정 수 | 총 운전 시간 | 진동 RMS (시작→종료) |
+|---------|--------:|------------:|---------------------|
+| Train1  | 126     | 21.0 h     | 0.16 → 1.28 (8.0×)  |
+| Train2  | 114     | 19.0 h     | 0.15 → 0.49 (3.4×)  |
+| Train3  | 89      | 14.8 h     | 0.15 → 0.29 (1.9×)  |
+| Train4  | 137     | 22.8 h     | 0.21 → 0.32 (1.5×)  |
+| Test1~6 | 50 each | -          | (RUL 비공개)         |
 
 ## 사용법
 
 ```bash
-# 데이터 준비 (TDMS → numpy)
-python data/convert_tdms.py --input /path/to/Train --explore  # 구조 확인
-python data/convert_tdms.py --input /path/to/Train            # 변환
+# 1. KIMM 데이터 플랫폼에서 Train.zip + Test.zip 다운로드 후
+#    download/ 폴더에 압축 해제
+unzip Train.zip -d download/extracted/
+unzip Test.zip  -d download/extracted/
+# 내부 nested zip도 풀기:
+cd download/extracted && for f in *.zip; do unzip -q "$f" && rm "$f"; done
 
-# 파이프라인 실행
+# 2. TDMS → numpy 변환 (Train1~4, Test1~6 → data/raw/)
+python data/convert_tdms.py
+
+# 3. 파이프라인 실행 (각 LOBO 평가)
 python 01_경민팀_OrderTracking/pipeline.py
 python 02_태환팀_SpectrogramCNN/pipeline.py
-python 03_교수설계_Ensemble/pipeline.py
-
-# 결과 비교
-python compare_results.py
+python 03_김현우_Ensemble/pipeline.py
 ```
 
 ## 평가 공식
