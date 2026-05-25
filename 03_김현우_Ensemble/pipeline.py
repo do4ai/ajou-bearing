@@ -39,11 +39,13 @@ METHOD_DIR = Path(__file__).resolve().parent
 RESULT_DIR = METHOD_DIR / "results"; RESULT_DIR.mkdir(parents=True, exist_ok=True)
 MODEL_DIR = METHOD_DIR / "models"; MODEL_DIR.mkdir(parents=True, exist_ok=True)
 SEQ_LEN = 10
-SEEDS = [42, 7, 123, 2026, 99]
+SEEDS = [42, 7, 123, 2026, 99, 365, 1234, 777, 5050, 9999]   # v10: 10개 시드
 EPOCHS = 300
-PATIENCE = 70
-AUG_NOISE_STD = 0.02
-TRIM = 1  # trimmed mean: 양쪽에서 TRIM개씩 제거 후 평균
+PATIENCE = 120
+AUG_NOISE_STD = 0.035
+TRIM = 3                # v10: trim 3개 (worst 3개 제거), 7개 사용
+SCORE_LOSS_START = 30
+MIN_EPOCHS = 80
 
 print("=" * 70); print("  v3: TFT Multi-Seed Ensemble + σ-aware 보수 보정"); print("=" * 70)
 
@@ -198,6 +200,25 @@ def aloss_torch(p, t):
     return torch.where(e > 0, 2.5 * e.pow(2), e.pow(2)).mean()
 
 
+def score_loss_torch(p_norm, t_norm, rul_max):
+    """평가지표 1 - asym_score 직접 미분. p_norm/t_norm 은 [0,1] 정규화 영역."""
+    p = p_norm * rul_max  # 초 단위로 복원
+    t = t_norm * rul_max
+    er = 100.0 * (t - p) / (t.abs() + 1.0)  # 퍼센트 오차
+    ln_half = float(np.log(0.5))
+    # er <= 0 (늦은 예측): arg = -ln(0.5)*(-er)/20
+    # er > 0 (이른 예측):  arg = +ln(0.5)*er/50
+    arg_late = torch.clamp(-ln_half * (-er).clamp(min=0) / 20.0, -50.0, 0.0)
+    arg_early = torch.clamp( ln_half *   er.clamp(min=0)  / 50.0, -50.0, 0.0)
+    A = torch.where(er <= 0, arg_late.exp(), arg_early.exp())
+    return 1.0 - A.mean()
+
+
+def combined_loss(p_norm, t_norm, rul_max, alpha=0.7):
+    """alpha = 0.7 (asym MSE) + 0.3 (score loss). 균형잡힌 학습."""
+    return alpha * aloss_torch(p_norm, t_norm) + (1 - alpha) * score_loss_torch(p_norm, t_norm, rul_max)
+
+
 # ── TFT 아키텍처 ───────────────────────────────────────────────────
 class TCNBlock(nn.Module):
     def __init__(self, ic, oc, d=1):
@@ -246,7 +267,9 @@ def train_tft(Xtr_seq, ytr_seq_norm, Xvl_seq, yvl_raw, rul_max, seed, epochs=EPO
     for ep in range(epochs):
         tft.train()
         for xb, yb in tld:
-            ol.zero_grad(); aloss_torch(tft(xb), yb).backward()
+            ol.zero_grad()
+            alpha = 1.0 if ep < SCORE_LOSS_START else max(0.4, 1.0 - (ep - SCORE_LOSS_START) / 120.0)
+            combined_loss(tft(xb), yb, rul_max, alpha=alpha).backward()
             nn.utils.clip_grad_norm_(tft.parameters(), 1.); ol.step()
         sched.step(); tft.eval()
         with torch.no_grad():
@@ -254,7 +277,8 @@ def train_tft(Xtr_seq, ytr_seq_norm, Xvl_seq, yvl_raw, rul_max, seed, epochs=EPO
         s = asym_score(vp, yvl_raw)
         if s > bs: bs = s; bst = {k: v.clone() for k, v in tft.state_dict().items()}; no_imp = 0
         else: no_imp += 1
-        if no_imp >= patience: break
+        # v9: MIN_EPOCHS 전에는 early stop 불가 (score loss 단계 도달 보장)
+        if ep >= MIN_EPOCHS and no_imp >= patience: break
     tft.load_state_dict(bst); tft.eval()
     with torch.no_grad():
         pred = np.nan_to_num(tft(torch.tensor(Xvl_seq)).numpy()) * rul_max
