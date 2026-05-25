@@ -122,6 +122,23 @@ class TFTModel(nn.Module):
         return self.fc(ctx).squeeze(-1)
 
 
+class BiLSTMModel(nn.Module):
+    def __init__(self, fd, dm=64):
+        super().__init__()
+        self.vsn = nn.Sequential(nn.Linear(fd, fd), nn.Softmax(dim=-1))
+        self.proj = nn.Linear(fd, dm)
+        self.lstm = nn.LSTM(dm, dm // 2, num_layers=2, batch_first=True,
+                             bidirectional=True, dropout=0.2)
+        self.attn = nn.Sequential(nn.Linear(dm, 32), nn.Tanh(), nn.Linear(32, 1))
+        self.fc = nn.Sequential(nn.Linear(dm, 32), nn.GELU(), nn.Dropout(0.2), nn.Linear(32, 1))
+    def forward(self, x):
+        w = self.vsn(x); xw = self.proj(x * w)
+        o, _ = self.lstm(xw)
+        a = torch.softmax(self.attn(o).squeeze(-1), dim=1).unsqueeze(-1)
+        ctx = (o * a).sum(dim=1)
+        return self.fc(ctx).squeeze(-1)
+
+
 def main():
     print("=" * 70); print("  v3 Test 추론 — 4 folds × 3 seeds = 12 TFT 앙상블"); print("=" * 70)
 
@@ -177,18 +194,27 @@ def main():
             else:
                 vs = np.array([X_fold[i:i+SEQ_LEN] for i in range(len(X_fold)-SEQ_LEN+1)], np.float32)
                 pred_len = len(X_fold)
-            # 각 시드별 예측
+            # v11: TFT + BiLSTM 둘 다 로드
+            arch_seeds = []
+            if "TFT_SEEDS" in meta:
+                arch_seeds.extend([("tft", TFTModel, s) for s in meta["TFT_SEEDS"]])
+                arch_seeds.extend([("bilstm", BiLSTMModel, s) for s in meta["BILSTM_SEEDS"]])
+            else:
+                arch_seeds.extend([("tft", TFTModel, s) for s in SEEDS])
             fold_seed_preds = []
-            for sd in SEEDS:
-                tft = TFTModel(len(FC_HI_fold))
-                tft.load_state_dict(torch.load(fold_dir / f"tft_seed{sd}.pt"))
-                tft.eval()
+            for arch_name, cls, sd in arch_seeds:
+                model = cls(len(FC_HI_fold))
+                ckpt = fold_dir / f"{arch_name}_seed{sd}.pt"
+                if not ckpt.exists():
+                    # 호환성: 옛 tft_seedX.pt 이름
+                    ckpt = fold_dir / f"tft_seed{sd}.pt"
+                model.load_state_dict(torch.load(ckpt))
+                model.eval()
                 with torch.no_grad():
-                    raw = tft(torch.tensor(vs)).numpy() * rul_max
-                # 시퀀스가 부족했을 때는 raw가 짧음 — 첫 부분 패딩
+                    raw = model(torch.tensor(vs)).numpy() * rul_max
                 full_pred = np.zeros(pred_len, dtype=np.float32)
                 offset = pred_len - len(raw)
-                full_pred[:offset] = raw[0]  # 초기 측정은 첫 예측값
+                full_pred[:offset] = raw[0]
                 full_pred[offset:] = raw
                 fold_seed_preds.append(full_pred)
                 all_preds.append(full_pred)

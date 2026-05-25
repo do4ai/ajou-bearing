@@ -39,11 +39,13 @@ METHOD_DIR = Path(__file__).resolve().parent
 RESULT_DIR = METHOD_DIR / "results"; RESULT_DIR.mkdir(parents=True, exist_ok=True)
 MODEL_DIR = METHOD_DIR / "models"; MODEL_DIR.mkdir(parents=True, exist_ok=True)
 SEQ_LEN = 10
-SEEDS = [42, 7, 123, 2026, 99, 365, 1234, 777, 5050, 9999]   # v10: 10개 시드
+TFT_SEEDS = [42, 7, 123, 2026, 99]      # v11: TFT 5개 시드
+BILSTM_SEEDS = [365, 1234, 777, 5050, 9999]   # v11: BiLSTM 5개 시드
+SEEDS = TFT_SEEDS + BILSTM_SEEDS         # 호환성 (저장용)
 EPOCHS = 300
 PATIENCE = 120
 AUG_NOISE_STD = 0.035
-TRIM = 3                # v10: trim 3개 (worst 3개 제거), 7개 사용
+TRIM = 3                # 10개 중 worst 3개 제거 → 7개 평균
 SCORE_LOSS_START = 30
 MIN_EPOCHS = 80
 
@@ -245,6 +247,24 @@ class TFTModel(nn.Module):
         return self.fc(ctx).squeeze(-1)
 
 
+class BiLSTMModel(nn.Module):
+    """다양성 위한 BiLSTM (TFT와 다른 inductive bias)"""
+    def __init__(self, fd, dm=64):
+        super().__init__()
+        self.vsn = nn.Sequential(nn.Linear(fd, fd), nn.Softmax(dim=-1))
+        self.proj = nn.Linear(fd, dm)
+        self.lstm = nn.LSTM(dm, dm // 2, num_layers=2, batch_first=True,
+                             bidirectional=True, dropout=0.2)
+        self.attn = nn.Sequential(nn.Linear(dm, 32), nn.Tanh(), nn.Linear(32, 1))
+        self.fc = nn.Sequential(nn.Linear(dm, 32), nn.GELU(), nn.Dropout(0.2), nn.Linear(32, 1))
+    def forward(self, x):
+        w = self.vsn(x); xw = self.proj(x * w)
+        o, _ = self.lstm(xw)
+        a = torch.softmax(self.attn(o).squeeze(-1), dim=1).unsqueeze(-1)
+        ctx = (o * a).sum(dim=1)
+        return self.fc(ctx).squeeze(-1)
+
+
 class AugDS(Dataset):
     def __init__(self, X, y, noise=AUG_NOISE_STD):
         self.X = torch.tensor(X, dtype=torch.float32); self.y = torch.tensor(y, dtype=torch.float32)
@@ -256,33 +276,37 @@ class AugDS(Dataset):
         return x, self.y[i]
 
 
-def train_tft(Xtr_seq, ytr_seq_norm, Xvl_seq, yvl_raw, rul_max, seed, epochs=EPOCHS, patience=PATIENCE):
+def train_model(model_cls, Xtr_seq, ytr_seq_norm, Xvl_seq, yvl_raw, rul_max, seed,
+                epochs=EPOCHS, patience=PATIENCE):
     torch.manual_seed(seed); np.random.seed(seed)
     fd = Xtr_seq.shape[-1]
-    tft = TFTModel(fd, dm=64, nh=4)
-    ol = optim.AdamW(tft.parameters(), lr=5e-4, weight_decay=1e-3)
+    model = model_cls(fd)
+    ol = optim.AdamW(model.parameters(), lr=5e-4, weight_decay=1e-3)
     sched = optim.lr_scheduler.CosineAnnealingWarmRestarts(ol, T_0=80, T_mult=2)
     tld = DataLoader(AugDS(Xtr_seq, ytr_seq_norm), batch_size=32, shuffle=True)
     bs, bst, no_imp = -np.inf, None, 0
     for ep in range(epochs):
-        tft.train()
+        model.train()
         for xb, yb in tld:
             ol.zero_grad()
             alpha = 1.0 if ep < SCORE_LOSS_START else max(0.4, 1.0 - (ep - SCORE_LOSS_START) / 120.0)
-            combined_loss(tft(xb), yb, rul_max, alpha=alpha).backward()
-            nn.utils.clip_grad_norm_(tft.parameters(), 1.); ol.step()
-        sched.step(); tft.eval()
+            combined_loss(model(xb), yb, rul_max, alpha=alpha).backward()
+            nn.utils.clip_grad_norm_(model.parameters(), 1.); ol.step()
+        sched.step(); model.eval()
         with torch.no_grad():
-            vp = np.nan_to_num(tft(torch.tensor(Xvl_seq)).numpy()) * rul_max
+            vp = np.nan_to_num(model(torch.tensor(Xvl_seq)).numpy()) * rul_max
         s = asym_score(vp, yvl_raw)
-        if s > bs: bs = s; bst = {k: v.clone() for k, v in tft.state_dict().items()}; no_imp = 0
+        if s > bs: bs = s; bst = {k: v.clone() for k, v in model.state_dict().items()}; no_imp = 0
         else: no_imp += 1
-        # v9: MIN_EPOCHS 전에는 early stop 불가 (score loss 단계 도달 보장)
         if ep >= MIN_EPOCHS and no_imp >= patience: break
-    tft.load_state_dict(bst); tft.eval()
+    model.load_state_dict(bst); model.eval()
     with torch.no_grad():
-        pred = np.nan_to_num(tft(torch.tensor(Xvl_seq)).numpy()) * rul_max
-    return tft, pred, bs
+        pred = np.nan_to_num(model(torch.tensor(Xvl_seq)).numpy()) * rul_max
+    return model, pred, bs
+
+# 호환성: 기존 호출 train_tft → train_model 위임
+def train_tft(*args, **kwargs):
+    return train_model(TFTModel, *args, **kwargs)
 
 
 # ── LOBO ───────────────────────────────────────────────────────────
@@ -311,16 +335,20 @@ for val in TRAIN_NAMES:
     vs = np.array(vs, np.float32); vt_arr = np.array(vt_l, np.float32)
     rul_max = max(tr_t.max(), 1.0); tr_tn = tr_t / rul_max
 
-    # ── 다중 시드 TFT 학습 ──
-    print(f"    TFT × {len(SEEDS)} seeds...", flush=True)
+    # ── 다중 시드 + 다중 아키텍처 학습 ──
+    print(f"    TFT × {len(TFT_SEEDS)} + BiLSTM × {len(BILSTM_SEEDS)} seeds...", flush=True)
     fold_models = []
     fold_preds = []
     fold_best = []
-    for sd in SEEDS:
-        t0 = time.time()
-        tft, pred, best = train_tft(tr_s, tr_tn, vs, vt_arr, rul_max, sd)
-        fold_models.append(tft); fold_preds.append(pred); fold_best.append(best)
-        print(f"      seed={sd}: best={best:.4f}  {time.time()-t0:.1f}s", flush=True)
+    fold_archs = []
+    for arch_name, cls, sds in [("TFT", TFTModel, TFT_SEEDS),
+                                  ("BiLSTM", BiLSTMModel, BILSTM_SEEDS)]:
+        for sd in sds:
+            t0 = time.time()
+            model, pred, best = train_model(cls, tr_s, tr_tn, vs, vt_arr, rul_max, sd)
+            fold_models.append(model); fold_preds.append(pred); fold_best.append(best)
+            fold_archs.append(arch_name)
+            print(f"      {arch_name} seed={sd}: best={best:.4f}  {time.time()-t0:.1f}s", flush=True)
     fold_preds = np.array(fold_preds)  # [n_seeds, n_val]
     pred_mean = fold_preds.mean(axis=0)
     pred_median = np.median(fold_preds, axis=0)
@@ -379,9 +407,11 @@ for val in TRAIN_NAMES:
     # 모델 저장
     fold_dir = MODEL_DIR / f"fold_{val}"; fold_dir.mkdir(exist_ok=True)
     for i, m in enumerate(fold_models):
-        torch.save(m.state_dict(), fold_dir / f"tft_seed{SEEDS[i]}.pt")
+        sd = SEEDS[i]; arch = fold_archs[i]
+        torch.save(m.state_dict(), fold_dir / f"{arch.lower()}_seed{sd}.pt")
     joblib.dump(gpr, fold_dir / "gpr.pkl")
     joblib.dump({"scaler": sc2, "rul_max": rul_max, "FC_HI": FC_HI,
+                 "TFT_SEEDS": TFT_SEEDS, "BILSTM_SEEDS": BILSTM_SEEDS,
                  "SEEDS": SEEDS, "SEQ_LEN": SEQ_LEN}, fold_dir / "meta.pkl")
 
     # 시각화
