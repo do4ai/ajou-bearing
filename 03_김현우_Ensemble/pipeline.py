@@ -288,18 +288,27 @@ class GRUModel(nn.Module):
 
 
 class AugDS(Dataset):
-    def __init__(self, X, y, noise=AUG_NOISE_STD):
+    """v15: Gaussian noise + Mixup augmentation"""
+    def __init__(self, X, y, noise=AUG_NOISE_STD, mixup_alpha=0.2, mixup_prob=0.3):
         self.X = torch.tensor(X, dtype=torch.float32); self.y = torch.tensor(y, dtype=torch.float32)
-        self.noise = noise
+        self.noise = noise; self.mixup_alpha = mixup_alpha; self.mixup_prob = mixup_prob
     def __len__(self): return len(self.X)
     def __getitem__(self, i):
-        x = self.X[i]
+        x = self.X[i]; y = self.y[i]
+        # Mixup: 인접한 측정 (시간 가까움) 과 가중 평균 → 가짜 측정
+        if self.mixup_alpha > 0 and np.random.rand() < self.mixup_prob:
+            j = np.random.randint(len(self))
+            lam = float(np.random.beta(self.mixup_alpha, self.mixup_alpha))
+            x = lam * x + (1 - lam) * self.X[j]
+            y = lam * y + (1 - lam) * self.y[j]
         if self.noise > 0: x = x + torch.randn_like(x) * self.noise
-        return x, self.y[i]
+        return x, y
 
 
 def train_model(model_cls, Xtr_seq, ytr_seq_norm, Xvl_seq, yvl_raw, rul_max, seed,
-                epochs=EPOCHS, patience=PATIENCE):
+                epochs=EPOCHS, patience=PATIENCE, score_start=None):
+    """v15: score_start 모델별 조정 가능 (BiLSTM 학습 빠른 특성 고려)"""
+    if score_start is None: score_start = SCORE_LOSS_START
     torch.manual_seed(seed); np.random.seed(seed)
     fd = Xtr_seq.shape[-1]
     model = model_cls(fd)
@@ -311,7 +320,7 @@ def train_model(model_cls, Xtr_seq, ytr_seq_norm, Xvl_seq, yvl_raw, rul_max, see
         model.train()
         for xb, yb in tld:
             ol.zero_grad()
-            alpha = 1.0 if ep < SCORE_LOSS_START else max(0.4, 1.0 - (ep - SCORE_LOSS_START) / 120.0)
+            alpha = 1.0 if ep < score_start else max(0.4, 1.0 - (ep - score_start) / 120.0)
             combined_loss(model(xb), yb, rul_max, alpha=alpha).backward()
             nn.utils.clip_grad_norm_(model.parameters(), 1.); ol.step()
         sched.step(); model.eval()
@@ -326,7 +335,6 @@ def train_model(model_cls, Xtr_seq, ytr_seq_norm, Xvl_seq, yvl_raw, rul_max, see
         pred = np.nan_to_num(model(torch.tensor(Xvl_seq)).numpy()) * rul_max
     return model, pred, bs
 
-# 호환성: 기존 호출 train_tft → train_model 위임
 def train_tft(*args, **kwargs):
     return train_model(TFTModel, *args, **kwargs)
 
@@ -363,13 +371,16 @@ for val in TRAIN_NAMES:
     fold_preds = []
     fold_best = []
     fold_archs = []
-    arch_list = [("TFT", TFTModel, TFT_SEEDS), ("BiLSTM", BiLSTMModel, BILSTM_SEEDS)]
+    # v15: BiLSTM은 학습 빠름 → score loss 일찍 (ep 10)
+    arch_list = [("TFT", TFTModel, TFT_SEEDS, 30),
+                  ("BiLSTM", BiLSTMModel, BILSTM_SEEDS, 10)]
     if GRU_SEEDS:
-        arch_list.append(("GRU", GRUModel, GRU_SEEDS))
-    for arch_name, cls, sds in arch_list:
+        arch_list.append(("GRU", GRUModel, GRU_SEEDS, 20))
+    for arch_name, cls, sds, sc_start in arch_list:
         for sd in sds:
             t0 = time.time()
-            model, pred, best = train_model(cls, tr_s, tr_tn, vs, vt_arr, rul_max, sd)
+            model, pred, best = train_model(cls, tr_s, tr_tn, vs, vt_arr, rul_max, sd,
+                                              score_start=sc_start)
             fold_models.append(model); fold_preds.append(pred); fold_best.append(best)
             fold_archs.append(arch_name)
             print(f"      {arch_name} seed={sd}: best={best:.4f}  {time.time()-t0:.1f}s", flush=True)
