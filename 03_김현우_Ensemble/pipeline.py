@@ -288,21 +288,25 @@ class GRUModel(nn.Module):
 
 
 class AugDS(Dataset):
-    """v15: Gaussian noise + Mixup augmentation"""
+    """v17: Gaussian noise + Mixup (v15 설정: prob 0.3, α 0.2) + sample weight"""
     def __init__(self, X, y, noise=AUG_NOISE_STD, mixup_alpha=0.2, mixup_prob=0.3):
         self.X = torch.tensor(X, dtype=torch.float32); self.y = torch.tensor(y, dtype=torch.float32)
         self.noise = noise; self.mixup_alpha = mixup_alpha; self.mixup_prob = mixup_prob
+        # v17: 마지막 30% RUL 측정에 weight 2.0 (열화 진행 부분 강화)
+        y_np = self.y.numpy()
+        threshold = np.percentile(y_np, 30)
+        self.weight = torch.tensor(np.where(y_np < threshold, 2.0, 1.0), dtype=torch.float32)
     def __len__(self): return len(self.X)
     def __getitem__(self, i):
-        x = self.X[i]; y = self.y[i]
-        # Mixup: 인접한 측정 (시간 가까움) 과 가중 평균 → 가짜 측정
+        x = self.X[i]; y = self.y[i]; w = self.weight[i]
         if self.mixup_alpha > 0 and np.random.rand() < self.mixup_prob:
             j = np.random.randint(len(self))
             lam = float(np.random.beta(self.mixup_alpha, self.mixup_alpha))
             x = lam * x + (1 - lam) * self.X[j]
             y = lam * y + (1 - lam) * self.y[j]
+            w = lam * w + (1 - lam) * self.weight[j]
         if self.noise > 0: x = x + torch.randn_like(x) * self.noise
-        return x, y
+        return x, y, w
 
 
 def train_model(model_cls, Xtr_seq, ytr_seq_norm, Xvl_seq, yvl_raw, rul_max, seed,
@@ -318,10 +322,16 @@ def train_model(model_cls, Xtr_seq, ytr_seq_norm, Xvl_seq, yvl_raw, rul_max, see
     bs, bst, no_imp = -np.inf, None, 0
     for ep in range(epochs):
         model.train()
-        for xb, yb in tld:
+        for batch in tld:
+            xb, yb, wb = batch
             ol.zero_grad()
             alpha = 1.0 if ep < score_start else max(0.4, 1.0 - (ep - score_start) / 120.0)
-            combined_loss(model(xb), yb, rul_max, alpha=alpha).backward()
+            # v17: sample weight 적용 (마지막 30% 측정 강화)
+            pred = model(xb); e = pred - yb
+            weighted_mse = (torch.where(e > 0, 2.5 * e.pow(2), e.pow(2)) * wb).mean()
+            score_l = score_loss_torch(pred, yb, rul_max)
+            loss = alpha * weighted_mse + (1 - alpha) * score_l
+            loss.backward()
             nn.utils.clip_grad_norm_(model.parameters(), 1.); ol.step()
         sched.step(); model.eval()
         with torch.no_grad():
