@@ -1,16 +1,13 @@
-"""교수 설계 v3: TFT-Multi-Seed Ensemble + GPR σ-aware 보수 보정
+"""v22: v18 (EoL 50x) + 채널 대칭 피처 (v20에서 입증된 채널-invariant 신호)
 
-v2 분석 결과 TFT 단독이 평균 0.579로 최강. 다른 모델은 노이즈만 추가.
-v3 전략: TFT 다중 시드 + 아키텍처 다양화 + GPR σ로 보수적 조정만 사용.
+v18의 약점: Train4 같은 channel-specific failure를 못 잡음 (ch0만 잘 보는 경향).
+v20에서 채널 대칭 피처는 좋았지만 EoL 완화로 last 망함.
+v22: v18 학습 설정 (EoL 50x, asym 5x) 그대로 + 채널 대칭 피처만 추가.
 
-핵심 개선:
-  1. TFT 3 seeds 앙상블 (median 사용 → outlier robust)
-  2. SEQ_LEN 8→10
-  3. Data augmentation: 가우시안 노이즈 인젝션
-  4. 학습 epoch 200→300, patience 50→70
-  5. GPR은 σ만 사용 (예측은 TFT 평균)
-  6. 보수적 보정: TFT_mean - 0.15·σ_GPR
-  7. XGBoost 제거 (Train3에서 노이즈만 추가)
+핵심 변경 (v18 → v22):
+  1. 채널 대칭 피처 (max/min/range/std/top2 across 4 channels)
+  2. 온도 차이 (tf-tr), temp_ratio
+  3. 모든 학습 설정은 v18과 동일
 """
 import os
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
@@ -31,29 +28,33 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.gaussian_process import GaussianProcessRegressor
 from sklearn.gaussian_process.kernels import Matern, RBF, WhiteKernel, ConstantKernel as C
 from sklearn.metrics import mean_squared_error
-import joblib
-import matplotlib; matplotlib.use("Agg")
+import joblib, matplotlib
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 METHOD_DIR = Path(__file__).resolve().parent
 RESULT_DIR = METHOD_DIR / "results"; RESULT_DIR.mkdir(parents=True, exist_ok=True)
-MODEL_DIR = METHOD_DIR / "models"; MODEL_DIR.mkdir(parents=True, exist_ok=True)
+MODEL_DIR = METHOD_DIR / "models_v22"; MODEL_DIR.mkdir(parents=True, exist_ok=True)
 SEQ_LEN = 10
-TFT_SEEDS = [42, 7, 123, 2026, 99]               # v11 (best) 5개
-BILSTM_SEEDS = [365, 1234, 777, 5050, 9999]      # v11 (best) 5개
-GRU_SEEDS = []
-SEEDS = TFT_SEEDS + BILSTM_SEEDS + GRU_SEEDS
+TFT_SEEDS = [42, 7, 123, 2026, 99]
+BILSTM_SEEDS = [365, 1234, 777, 5050, 9999]
+SEEDS = TFT_SEEDS + BILSTM_SEEDS
 EPOCHS = 300
 PATIENCE = 120
 AUG_NOISE_STD = 0.035
-TRIM = 3                # v11 best: 10개 중 worst 3 → top 7
+TRIM = 3
 SCORE_LOSS_START = 30
 MIN_EPOCHS = 80
 BILSTM_DM = 64
+ASYM_PENALTY = 5.0           # v17: 2.5 → v18: 5.0 (늦은 예측 강력 페널티)
+EOL_LAST_K = 5               # 마지막 5측정에 50x
+EOL_MID_K = 15               # 다음 15측정에 10x
+LATE_BIAS_INIT = 0.95        # 첫 예측에 0.95 곱하기 (선호적 early)
 
-print("=" * 70); print("  v3: TFT Multi-Seed Ensemble + σ-aware 보수 보정"); print("=" * 70)
+print("=" * 70); print("  v22: v18 + 채널 대칭 피처 (Train4 ch3-failure 대응)"); print("=" * 70)
 
-# ── 신호처리 (v2 동일) ────────────────────────────────────────────
+
+# ── 4채널 신호처리 ─────────────────────────────────────────────────
 def bp(s, lo=1000, hi=6000, fs=FS):
     nyq = fs / 2; b, a = butter(4, [lo/nyq, hi/nyq], btype="band"); return filtfilt(b, a, s)
 
@@ -70,64 +71,112 @@ def fast_kurt(sig, fs=FS):
         if kr > bk: bk = kr; bfc = (lo+hi)/2; bbw = (hi-lo)
     return bfc, bbw, bk
 
-def extract(s4, rpm, torque, tf, tr):
-    s = s4[0].astype(np.float64); s_all = s4.astype(np.float64)
+
+def ch_feats(s, prefix):
+    """단일 채널 기본 통계 + 주파수 피처."""
+    s = s.astype(np.float64)
     rms = float(np.sqrt(np.mean(s**2))); std = float(np.std(s))
-    k = float(sp_kurt(s)); sk = float(sp_skew(s)); pk = float(np.max(np.abs(s))); crest = pk/(rms+1e-10)
+    k = float(sp_kurt(s)); sk = float(sp_skew(s))
+    pk = float(np.max(np.abs(s))); crest = pk / (rms + 1e-10)
     p2p = float(np.ptp(s)); shape_f = rms / (np.mean(np.abs(s)) + 1e-10)
-    rms_multi = float(np.sqrt(np.mean(s_all**2)))
     try:
         fc, bw, sk_kurt = fast_kurt(s); nyq = FS/2
         lo, hi = max(fc-bw/2, 10)/nyq, min(fc+bw/2, nyq*0.99)/nyq
-        if 0 < lo < hi < 1: b, a = butter(4, [lo, hi], btype="band"); filt = filtfilt(b, a, s)
+        if 0 < lo < hi < 1:
+            b, a = butter(4, [lo, hi], btype="band"); filt = filtfilt(b, a, s)
         else: filt = bp(s); sk_kurt = 0.0
     except: filt = bp(s); fc = 3000.; bw = 2000.; sk_kurt = 0.0
     env = np.abs(hilbert(filt)); del filt
     env_rms = float(np.sqrt(np.mean(env**2))); env_kurt = float(sp_kurt(env))
     sp2 = np.abs(np.fft.rfft(env)) / len(env); ords = np.fft.rfftfreq(len(env), d=1/256)
     nf = float(np.mean(sp2[ords > 12])) + 1e-12
-    feats = {"rms": rms, "std": std, "kurtosis": k, "skewness": sk, "peak": pk,
-             "crest": crest, "p2p": p2p, "shape_f": shape_f, "rms_multi": rms_multi,
-             "fc": fc, "bw": bw, "sk_kurt": sk_kurt, "env_rms": env_rms, "env_kurt": env_kurt}
+    out = {f"{prefix}_rms": rms, f"{prefix}_std": std, f"{prefix}_kurt": k,
+           f"{prefix}_skew": sk, f"{prefix}_peak": pk, f"{prefix}_crest": crest,
+           f"{prefix}_p2p": p2p, f"{prefix}_shape_f": shape_f,
+           f"{prefix}_fc": fc, f"{prefix}_bw": bw, f"{prefix}_sk_kurt": sk_kurt,
+           f"{prefix}_env_rms": env_rms, f"{prefix}_env_kurt": env_kurt}
     for nm, o in ORDERS.items():
         e1 = float(np.sum(sp2[(ords >= o-0.15) & (ords <= o+0.15)]**2))
         e2 = float(np.sum(sp2[(ords >= 2*o-0.15) & (ords <= 2*o+0.15)]**2))
         e3 = float(np.sum(sp2[(ords >= 3*o-0.15) & (ords <= 3*o+0.15)]**2))
-        feats[f"{nm.lower()}_e"] = e1 + e2 + e3
-        feats[f"{nm.lower()}_snr"] = (e1 + e2 + e3) / nf
-        feats[f"{nm.lower()}_h_ratio"] = e1 / (e2 + e3 + 1e-12)
-    feats.update({"rpm": float(rpm), "torque": float(torque), "tf": float(tf),
-                  "tr": float(tr), "power_proxy": float(rpm * abs(torque))})
+        out[f"{prefix}_{nm.lower()}_e"] = e1 + e2 + e3
+        out[f"{prefix}_{nm.lower()}_snr"] = (e1 + e2 + e3) / nf
+        out[f"{prefix}_{nm.lower()}_h_ratio"] = e1 / (e2 + e3 + 1e-12)
+    return out
+
+
+def extract(s4, rpm, torque, tf, tr):
+    """v22: 4채널 피처 + 채널 대칭 피처."""
+    feats = {}
+    per_ch = {}
+    for ci in range(4):
+        f = ch_feats(s4[ci], f"ch{ci}")
+        feats.update(f); per_ch[ci] = f
+    # ★ 채널 대칭 피처 (Train4 ch3-failure 같은 패턴 잡기) ★
+    common_keys = ["rms","std","kurt","skew","peak","crest","p2p","env_rms","env_kurt","sk_kurt"]
+    for nm, o in ORDERS.items():
+        common_keys.extend([f"{nm.lower()}_e", f"{nm.lower()}_snr", f"{nm.lower()}_h_ratio"])
+    for k in common_keys:
+        vals = np.array([per_ch[ci][f"ch{ci}_{k}"] for ci in range(4)], dtype=np.float64)
+        feats[f"chsym_max_{k}"] = float(vals.max())
+        feats[f"chsym_min_{k}"] = float(vals.min())
+        feats[f"chsym_range_{k}"] = float(vals.max() - vals.min())
+        feats[f"chsym_std_{k}"] = float(vals.std())
+        feats[f"chsym_top2_{k}"] = float(np.sort(vals)[-2:].mean())
+    # 다채널 통합
+    s_all = s4.astype(np.float64)
+    feats["rms_multi"] = float(np.sqrt(np.mean(s_all**2)))
+    feats["std_multi"] = float(np.std(s_all))
+    feats["peak_multi"] = float(np.max(np.abs(s_all)))
+    for i, j in [(0,1),(0,2),(0,3),(1,2),(1,3),(2,3)]:
+        c = np.corrcoef(s4[i].astype(np.float64), s4[j].astype(np.float64))[0,1]
+        feats[f"corr_{i}{j}"] = float(c) if np.isfinite(c) else 0.0
+    energies = np.array([float(np.mean(s4[i].astype(np.float64)**2)) for i in range(4)])
+    feats["energy_max"] = float(energies.max()); feats["energy_min"] = float(energies.min())
+    feats["energy_ratio"] = float(energies.max() / (energies.min() + 1e-10))
+    feats["energy_std"] = float(energies.std())
+    # 운전조건 + 온도 차이
+    rpm_v = float(rpm) if (rpm == rpm) else 800.0
+    tq_v = float(torque) if (torque == torque) else -5.0
+    tf_v = float(tf) if (tf == tf) else 30.0
+    tr_v = float(tr) if (tr == tr) else 30.0
+    feats.update({"rpm": rpm_v, "torque": tq_v, "tf": tf_v, "tr": tr_v,
+                  "power_proxy": rpm_v * abs(tq_v),
+                  "temp_diff": tf_v - tr_v,
+                  "temp_max": max(tf_v, tr_v),
+                  "temp_ratio": tf_v / (tr_v + 1e-6)})
     return feats
 
 
-# ── 피처 추출 ──────────────────────────────────────────────────────
-print("\n[1] 피처 추출...", flush=True)
+print("\n[1] 4채널 피처 추출 (시간 좀 걸림: 4채널 × ~466 측정)...", flush=True)
 dfs = {}
 for nm in TRAIN_NAMES:
     t0 = time.time(); sigs, op = load_bearing(nm)
-    rows = [{**extract(sigs[i], op.iloc[i].rpm, op.iloc[i].torque,
-                       op.iloc[i].temp_front, op.iloc[i].temp_rear),
-             "t_s": op.iloc[i].t_seconds, "rul_s": op.iloc[i].rul_seconds, "bearing": nm}
-            for i in range(len(op))]
+    rows = []
+    for i in range(len(op)):
+        row = op.iloc[i]
+        f = extract(sigs[i], row.rpm, row.torque, row.temp_front, row.temp_rear)
+        f["t_s"] = row.t_seconds; f["rul_s"] = row.rul_seconds; f["bearing"] = nm
+        rows.append(f)
     dfs[nm] = pd.DataFrame(rows); del sigs; gc.collect()
-    print(f"  {nm}: {len(dfs[nm])} 측정  {time.time()-t0:.1f}s", flush=True)
-df = pd.concat(dfs.values(), ignore_index=True); del dfs; gc.collect()
-# v6: lag 제거 (실험적으로 v3 베이스라인이 가장 안정적이었음)
+    print(f"  {nm}: {len(dfs[nm])} meas × {len(rows[0])} feats  {time.time()-t0:.1f}s", flush=True)
+df = pd.concat(dfs.values(), ignore_index=True)
 excl = {"t_s", "rul_s", "bearing"}
 FC = [c for c in df.columns if c not in excl and pd.api.types.is_numeric_dtype(df[c])]
-print(f"  피처: {len(FC)}개 (v6: lag 제거, v3 기반)", flush=True)
+print(f"  총 피처: {len(FC)}개 (v17: 31 → v18: {len(FC)})", flush=True)
 
 
-# ── DTC-VAE ────────────────────────────────────────────────────────
+# ── DTC-VAE (동일하지만 input dim 다름) ───────────────────────────
 class DTCVAE(nn.Module):
     def __init__(self, d, latent=4):
         super().__init__()
-        self.enc = nn.Sequential(nn.Linear(d, 64), nn.LayerNorm(64), nn.GELU(),
+        self.enc = nn.Sequential(nn.Linear(d, 128), nn.LayerNorm(128), nn.GELU(),
+                                 nn.Linear(128, 64), nn.LayerNorm(64), nn.GELU(),
                                  nn.Linear(64, 32), nn.LayerNorm(32), nn.GELU())
         self.mu = nn.Linear(32, latent); self.lv = nn.Linear(32, latent)
         self.dec = nn.Sequential(nn.Linear(latent, 32), nn.GELU(),
-                                 nn.Linear(32, 64), nn.GELU(), nn.Linear(64, d))
+                                 nn.Linear(32, 64), nn.GELU(),
+                                 nn.Linear(64, 128), nn.GELU(), nn.Linear(128, d))
     def fwd(self, x):
         h = self.enc(x); mu, lv = self.mu(h), self.lv(h)
         z = mu + torch.exp(0.5*lv) * torch.randn_like(mu) if self.training else mu
@@ -179,7 +228,7 @@ torch.save(vae.state_dict(), MODEL_DIR / "dtcvae.pt")
 joblib.dump({"FC": FC, "FC_HI": FC_HI, "bid_map": bid_map}, MODEL_DIR / "feature_meta.pkl")
 
 
-# ── CUSUM FPT + Piecewise RUL ──────────────────────────────────────
+# ── CUSUM FPT (보조용) ──────────────────────────────────────────────
 def cusum(hi, k=0.5, h=5., r=0.2):
     n = len(hi); n0 = max(5, int(n*r)); mu0 = hi[:n0].mean(); s0 = hi[:n0].std() + 1e-8; S = 0.
     for i in range(n0, n):
@@ -187,7 +236,7 @@ def cusum(hi, k=0.5, h=5., r=0.2):
         if S > h: return i
     return int(n * 0.8)
 
-print("\n[3] CUSUM FPT + Piecewise RUL...", flush=True)
+print("\n[3] CUSUM FPT + Piecewise RUL (보조 task)...", flush=True)
 fpt_dict = {}
 for nm in TRAIN_NAMES:
     mask = df.bearing == nm; hiv = df.loc[mask, "HI"].values; tv = df.loc[mask, "t_s"].values
@@ -198,32 +247,23 @@ for nm in TRAIN_NAMES:
 df["rul_pw"] = df["rul_pw"].fillna(df["rul_s"])
 
 
-# ── Asym loss (★부호 수정★) ────────────────────────────────────────
-def aloss_torch(p, t):
+# ── Loss ───────────────────────────────────────────────────────────
+def aloss_torch(p, t, penalty=ASYM_PENALTY):
     e = p - t
-    return torch.where(e > 0, 2.5 * e.pow(2), e.pow(2)).mean()
+    return torch.where(e > 0, penalty * e.pow(2), e.pow(2)).mean()
 
 
 def score_loss_torch(p_norm, t_norm, rul_max):
-    """평가지표 1 - asym_score 직접 미분. p_norm/t_norm 은 [0,1] 정규화 영역."""
-    p = p_norm * rul_max  # 초 단위로 복원
-    t = t_norm * rul_max
-    er = 100.0 * (t - p) / (t.abs() + 1.0)  # 퍼센트 오차
+    p = p_norm * rul_max; t = t_norm * rul_max
+    er = 100.0 * (t - p) / (t.abs() + 1.0)
     ln_half = float(np.log(0.5))
-    # er <= 0 (늦은 예측): arg = -ln(0.5)*(-er)/20
-    # er > 0 (이른 예측):  arg = +ln(0.5)*er/50
     arg_late = torch.clamp(-ln_half * (-er).clamp(min=0) / 20.0, -50.0, 0.0)
     arg_early = torch.clamp( ln_half *   er.clamp(min=0)  / 50.0, -50.0, 0.0)
     A = torch.where(er <= 0, arg_late.exp(), arg_early.exp())
     return 1.0 - A.mean()
 
 
-def combined_loss(p_norm, t_norm, rul_max, alpha=0.7):
-    """alpha = 0.7 (asym MSE) + 0.3 (score loss). 균형잡힌 학습."""
-    return alpha * aloss_torch(p_norm, t_norm) + (1 - alpha) * score_loss_torch(p_norm, t_norm, rul_max)
-
-
-# ── TFT 아키텍처 ───────────────────────────────────────────────────
+# ── 모델 ───────────────────────────────────────────────────────────
 class TCNBlock(nn.Module):
     def __init__(self, ic, oc, d=1):
         super().__init__()
@@ -250,7 +290,6 @@ class TFTModel(nn.Module):
 
 
 class BiLSTMModel(nn.Module):
-    """다양성 위한 BiLSTM (TFT와 다른 inductive bias)."""
     def __init__(self, fd, dm=BILSTM_DM):
         super().__init__()
         self.vsn = nn.Sequential(nn.Linear(fd, fd), nn.Softmax(dim=-1))
@@ -267,36 +306,21 @@ class BiLSTMModel(nn.Module):
         return self.fc(ctx).squeeze(-1)
 
 
-class GRUModel(nn.Module):
-    """GRU + Conv1D (다양성 추가)"""
-    def __init__(self, fd, dm=64):
-        super().__init__()
-        self.vsn = nn.Sequential(nn.Linear(fd, fd), nn.Softmax(dim=-1))
-        self.conv1 = nn.Conv1d(fd, dm, 3, padding=1)
-        self.conv2 = nn.Conv1d(dm, dm, 3, padding=1)
-        self.bn1 = nn.BatchNorm1d(dm); self.bn2 = nn.BatchNorm1d(dm)
-        self.gru = nn.GRU(dm, dm, num_layers=2, batch_first=True,
-                          bidirectional=True, dropout=0.2)
-        self.fc = nn.Sequential(nn.Linear(dm * 2, 32), nn.GELU(),
-                                nn.Dropout(0.2), nn.Linear(32, 1))
-    def forward(self, x):
-        w = self.vsn(x); xw = (x * w).transpose(1, 2)
-        c = torch.relu(self.bn1(self.conv1(xw)))
-        c = torch.relu(self.bn2(self.conv2(c))).transpose(1, 2)
-        o, _ = self.gru(c)
-        return self.fc(o[:, -1, :]).squeeze(-1)
-
-
+# ── 데이터셋: EoL 가중치 50x ───────────────────────────────────────
 class AugDS(Dataset):
-    """v17: Gaussian noise + Mixup (v15 설정: prob 0.3, α 0.2) + sample weight"""
-    def __init__(self, X, y, noise=AUG_NOISE_STD, mixup_alpha=0.2, mixup_prob=0.3):
+    """v18: rul_s 직접 학습 + EoL 강조 가중치."""
+    def __init__(self, X, y, eol_last_k=EOL_LAST_K, eol_mid_k=EOL_MID_K,
+                 noise=AUG_NOISE_STD, mixup_alpha=0.2, mixup_prob=0.3):
         self.X = torch.tensor(X, dtype=torch.float32); self.y = torch.tensor(y, dtype=torch.float32)
         self.noise = noise; self.mixup_alpha = mixup_alpha; self.mixup_prob = mixup_prob
-        # v18: 점진적 weight - RUL 짧을수록 가중치 크게
-        # bottom 20%: 3.0, 20-40%: 2.0, top 60%: 1.0
+        # rul_s 기준 가중치: y 작을수록 EoL → 가중치 폭증
+        # 마지막 EOL_LAST_K개에 50x, 다음 EOL_MID_K개에 10x, 그 외 1x
         y_np = self.y.numpy()
-        p20 = np.percentile(y_np, 20); p40 = np.percentile(y_np, 40)
-        w = np.where(y_np < p20, 3.0, np.where(y_np < p40, 2.0, 1.0))
+        order = np.argsort(y_np)  # 작은 RUL → 큰 인덱스부터 정렬됨
+        w = np.ones_like(y_np, dtype=np.float32)
+        # 정렬 후 작은 RUL k개에 가중치
+        w[order[:eol_last_k]] = 50.0
+        w[order[eol_last_k:eol_last_k+eol_mid_k]] = 10.0
         self.weight = torch.tensor(w, dtype=torch.float32)
     def __len__(self): return len(self.X)
     def __getitem__(self, i):
@@ -304,8 +328,7 @@ class AugDS(Dataset):
         if self.mixup_alpha > 0 and np.random.rand() < self.mixup_prob:
             j = np.random.randint(len(self))
             lam = float(np.random.beta(self.mixup_alpha, self.mixup_alpha))
-            x = lam * x + (1 - lam) * self.X[j]
-            y = lam * y + (1 - lam) * self.y[j]
+            x = lam * x + (1 - lam) * self.X[j]; y = lam * y + (1 - lam) * self.y[j]
             w = lam * w + (1 - lam) * self.weight[j]
         if self.noise > 0: x = x + torch.randn_like(x) * self.noise
         return x, y, w
@@ -313,24 +336,22 @@ class AugDS(Dataset):
 
 def train_model(model_cls, Xtr_seq, ytr_seq_norm, Xvl_seq, yvl_raw, rul_max, seed,
                 epochs=EPOCHS, patience=PATIENCE, score_start=None):
-    """v15: score_start 모델별 조정 가능 (BiLSTM 학습 빠른 특성 고려)"""
     if score_start is None: score_start = SCORE_LOSS_START
     torch.manual_seed(seed); np.random.seed(seed)
-    fd = Xtr_seq.shape[-1]
-    model = model_cls(fd)
+    fd = Xtr_seq.shape[-1]; model = model_cls(fd)
     ol = optim.AdamW(model.parameters(), lr=5e-4, weight_decay=1e-3)
     sched = optim.lr_scheduler.CosineAnnealingWarmRestarts(ol, T_0=80, T_mult=2)
     tld = DataLoader(AugDS(Xtr_seq, ytr_seq_norm), batch_size=32, shuffle=True)
     bs, bst, no_imp = -np.inf, None, 0
     for ep in range(epochs):
         model.train()
-        for batch in tld:
-            xb, yb, wb = batch
+        for xb, yb, wb in tld:
             ol.zero_grad()
-            alpha = 1.0 if ep < score_start else max(0.4, 1.0 - (ep - score_start) / 120.0)
-            # v17: sample weight 적용 (마지막 30% 측정 강화)
+            # alpha: 60% asym MSE + 40% score loss (v17: 70/30)
+            alpha = 1.0 if ep < score_start else max(0.30, 1.0 - (ep - score_start) / 100.0)
             pred = model(xb); e = pred - yb
-            weighted_mse = (torch.where(e > 0, 2.5 * e.pow(2), e.pow(2)) * wb).mean()
+            # ★ 가중 asym MSE: 늦은 예측 5x 페널티, EoL 50x 가중치 ★
+            weighted_mse = (torch.where(e > 0, ASYM_PENALTY * e.pow(2), e.pow(2)) * wb).mean()
             score_l = score_loss_torch(pred, yb, rul_max)
             loss = alpha * weighted_mse + (1 - alpha) * score_l
             loss.backward()
@@ -338,21 +359,24 @@ def train_model(model_cls, Xtr_seq, ytr_seq_norm, Xvl_seq, yvl_raw, rul_max, see
         sched.step(); model.eval()
         with torch.no_grad():
             vp = np.nan_to_num(model(torch.tensor(Xvl_seq)).numpy()) * rul_max
-        s = asym_score(vp, yvl_raw)
+        vp = np.clip(vp, 600.0, None)  # ★ 600s 하한 ★
+        # validation은 rul_s 기준 + last-only 점수 둘 다 추적
+        s_full = asym_score(vp, yvl_raw)
+        s_last = asym_score(vp[-1:], yvl_raw[-1:])
+        # 0.7 * full + 0.3 * last 가중 결합으로 early stopping
+        s = 0.7 * s_full + 0.3 * s_last
         if s > bs: bs = s; bst = {k: v.clone() for k, v in model.state_dict().items()}; no_imp = 0
         else: no_imp += 1
         if ep >= MIN_EPOCHS and no_imp >= patience: break
     model.load_state_dict(bst); model.eval()
     with torch.no_grad():
         pred = np.nan_to_num(model(torch.tensor(Xvl_seq)).numpy()) * rul_max
+    pred = np.clip(pred, 600.0, None)
     return model, pred, bs
-
-def train_tft(*args, **kwargs):
-    return train_model(TFTModel, *args, **kwargs)
 
 
 # ── LOBO ───────────────────────────────────────────────────────────
-print(f"\n[4] LOBO + TFT × {len(SEEDS)} seeds + GPR σ...", flush=True)
+print(f"\n[4] LOBO + 학습 ({len(SEEDS)} seeds/fold, rul_s 직접)...", flush=True)
 results = []
 
 for val in TRAIN_NAMES:
@@ -360,14 +384,14 @@ for val in TRAIN_NAMES:
     print(f"\n  Fold: Val={val}", flush=True)
     tr = df[df.bearing.isin(tns)]; vd = df[df.bearing == val]
     sc2 = StandardScaler().fit(tr[FC_HI].fillna(0))
-    Xtr_full = sc2.transform(tr[FC_HI].fillna(0)); ytr = tr["rul_pw"].values.astype(np.float32)
-    Xvl_full = sc2.transform(vd[FC_HI].fillna(0)); yvl = vd["rul_pw"].values.astype(np.float32)
+    Xtr_full = sc2.transform(tr[FC_HI].fillna(0)); ytr = tr["rul_s"].values.astype(np.float32)
+    Xvl_full = sc2.transform(vd[FC_HI].fillna(0)); yvl = vd["rul_s"].values.astype(np.float32)
 
-    # 시퀀스 구성 (Train 베어링 별로 시퀀스 만들고 합치기 → 베어링 경계 넘지 않게)
+    # 베어링별 시퀀스
     tr_s, tr_t = [], []
     for tn in tns:
         sub = df[df.bearing == tn]
-        X = sc2.transform(sub[FC_HI].fillna(0)); y = sub["rul_pw"].values
+        X = sc2.transform(sub[FC_HI].fillna(0)); y = sub["rul_s"].values  # ★ rul_s ★
         for i in range(len(X) - SEQ_LEN + 1):
             tr_s.append(X[i:i+SEQ_LEN]); tr_t.append(y[i+SEQ_LEN-1])
     vs, vt_l = [], []
@@ -377,38 +401,26 @@ for val in TRAIN_NAMES:
     vs = np.array(vs, np.float32); vt_arr = np.array(vt_l, np.float32)
     rul_max = max(tr_t.max(), 1.0); tr_tn = tr_t / rul_max
 
-    # ── v14: TFT 5 + BiLSTM 8 (GRU 폐기) ──
-    print(f"    TFT×{len(TFT_SEEDS)} + BiLSTM×{len(BILSTM_SEEDS)} = {len(SEEDS)} 모델", flush=True)
-    fold_models = []
-    fold_preds = []
-    fold_best = []
-    fold_archs = []
-    # v15: BiLSTM은 학습 빠름 → score loss 일찍 (ep 10)
-    arch_list = [("TFT", TFTModel, TFT_SEEDS, 30),
-                  ("BiLSTM", BiLSTMModel, BILSTM_SEEDS, 10)]
-    if GRU_SEEDS:
-        arch_list.append(("GRU", GRUModel, GRU_SEEDS, 20))
+    print(f"    TFT×{len(TFT_SEEDS)} + BiLSTM×{len(BILSTM_SEEDS)}", flush=True)
+    fold_models = []; fold_preds = []; fold_best = []; fold_archs = []
+    arch_list = [("TFT", TFTModel, TFT_SEEDS, 30), ("BiLSTM", BiLSTMModel, BILSTM_SEEDS, 10)]
     for arch_name, cls, sds, sc_start in arch_list:
         for sd in sds:
             t0 = time.time()
-            model, pred, best = train_model(cls, tr_s, tr_tn, vs, vt_arr, rul_max, sd,
-                                              score_start=sc_start)
-            fold_models.append(model); fold_preds.append(pred); fold_best.append(best)
-            fold_archs.append(arch_name)
-            print(f"      {arch_name} seed={sd}: best={best:.4f}  {time.time()-t0:.1f}s", flush=True)
-    fold_preds = np.array(fold_preds)  # [n_seeds, n_val]
+            model, pred, best = train_model(cls, tr_s, tr_tn, vs, vt_arr, rul_max, sd, score_start=sc_start)
+            fold_models.append(model); fold_preds.append(pred); fold_best.append(best); fold_archs.append(arch_name)
+            print(f"      {arch_name} seed={sd}: blended_best={best:.4f}  {time.time()-t0:.1f}s", flush=True)
+    fold_preds = np.array(fold_preds)
     pred_mean = fold_preds.mean(axis=0)
     pred_median = np.median(fold_preds, axis=0)
     pred_std_seeds = fold_preds.std(axis=0)
-    # Trimmed mean: 시드별 점수가 가장 낮은 TRIM개 제거 후 평균
     if len(fold_best) > 2 * TRIM:
-        keep_idx = np.argsort(fold_best)[TRIM:]  # 하위 TRIM 제거
+        keep_idx = np.argsort(fold_best)[TRIM:]
         pred_trimmed = fold_preds[keep_idx].mean(axis=0)
     else:
         pred_trimmed = pred_mean
 
-    # ── GPR (보수적 σ 보정용만 사용) ──
-    print(f"    GPR (σ for conservative shift)...", flush=True)
+    # GPR σ
     kernel = (C(1., (1e-3, 1e3)) * Matern(10., nu=2.5)
               + C(0.5, (1e-3, 1e3)) * RBF(50.)
               + WhiteKernel(0.1, noise_level_bounds=(1e-5, 1.0)))
@@ -419,35 +431,32 @@ for val in TRAIN_NAMES:
     Xvl_seq_last = Xvl_full[SEQ_LEN-1:]
     gmu, gstd = gpr.predict(Xvl_seq_last, return_std=True)
 
-    # ── 결합: TFT mean ± 보수적 보정 ──
-    nc = len(pred_mean); vc = vt_arr
-    # 1. seed median
-    p_med = pred_median
-    # 2. seed mean
-    p_mean = pred_mean
-    # 3. 보수적: TFT_mean - 0.15·σ_GPR - 0.10·σ_seeds (불확실성 두 종류)
-    p_cons = pred_mean - 0.15 * gstd - 0.10 * pred_std_seeds
-    # 4. ultra conservative: TFT_mean - 0.3σ_GPR
-    p_ultra = pred_mean - 0.3 * gstd
-    # 음수 방지
-    p_med = np.clip(p_med, 0, None); p_mean = np.clip(p_mean, 0, None)
-    p_cons = np.clip(p_cons, 0, None); p_ultra = np.clip(p_ultra, 0, None)
+    p_med = np.clip(pred_median, 600, None)
+    p_mean = np.clip(pred_mean, 600, None)
+    p_cons = np.clip(pred_mean - 0.15 * gstd - 0.10 * pred_std_seeds, 600, None)
+    p_ultra = np.clip(pred_mean - 0.30 * gstd, 600, None)
+    p_trim = np.clip(pred_trimmed, 600, None)
 
-    p_trim = np.clip(pred_trimmed, 0, None)
+    vc = vt_arr
     s_mean = asym_score(p_mean, vc); s_med = asym_score(p_med, vc)
     s_cons = asym_score(p_cons, vc); s_ultra = asym_score(p_ultra, vc)
     s_trim = asym_score(p_trim, vc)
-    candidates = {"mean": s_mean, "median": s_med, "cons": s_cons,
-                  "ultra": s_ultra, "trimmed": s_trim}
+    # last-only 점수 추가
+    sl_mean = asym_score(p_mean[-1:], vc[-1:])
+    sl_med = asym_score(p_med[-1:], vc[-1:])
+    sl_trim = asym_score(p_trim[-1:], vc[-1:])
+    candidates = {"mean": s_mean, "median": s_med, "cons": s_cons, "ultra": s_ultra, "trimmed": s_trim}
     best_strat = max(candidates, key=candidates.get); s_best = candidates[best_strat]
 
     rmse = np.sqrt(mean_squared_error(vc, p_mean))
-    print(f"  TFT mean={s_mean:.4f}  median={s_med:.4f}  trim={s_trim:.4f}  "
-          f"cons={s_cons:.4f}  ultra={s_ultra:.4f}  "
-          f"best={best_strat}({s_best:.4f})  RMSE={rmse:.0f}s", flush=True)
-    results.append({"val_bearing": val, "rmse_s": rmse,
-                    "tft_mean": s_mean, "tft_median": s_med, "tft_trim": s_trim,
-                    "tft_cons": s_cons, "tft_ultra": s_ultra,
+    print(f"  Full: mean={s_mean:.4f}  med={s_med:.4f}  trim={s_trim:.4f}  cons={s_cons:.4f}  ultra={s_ultra:.4f}", flush=True)
+    print(f"  Last: mean={sl_mean:.4f}  med={sl_med:.4f}  trim={sl_trim:.4f}  "
+          f"true={vc[-1]:.0f}s  pred={p_med[-1]:.0f}s", flush=True)
+    results.append({"val": val, "rmse_s": rmse,
+                    "full_mean": s_mean, "full_med": s_med, "full_trim": s_trim,
+                    "full_cons": s_cons, "full_ultra": s_ultra,
+                    "last_mean": sl_mean, "last_med": sl_med, "last_trim": sl_trim,
+                    "true_last": float(vc[-1]), "pred_last_med": float(p_med[-1]),
                     "best_strat": best_strat, "best_score": s_best,
                     "seeds": ",".join(f"{b:.3f}" for b in fold_best)})
 
@@ -459,36 +468,37 @@ for val in TRAIN_NAMES:
     joblib.dump(gpr, fold_dir / "gpr.pkl")
     joblib.dump({"scaler": sc2, "rul_max": rul_max, "FC_HI": FC_HI,
                  "TFT_SEEDS": TFT_SEEDS, "BILSTM_SEEDS": BILSTM_SEEDS,
-                 "GRU_SEEDS": GRU_SEEDS, "SEEDS": SEEDS, "SEQ_LEN": SEQ_LEN}, fold_dir / "meta.pkl")
+                 "SEEDS": SEEDS, "SEQ_LEN": SEQ_LEN}, fold_dir / "meta.pkl")
 
     # 시각화
     th = vd["t_s"].values[SEQ_LEN-1:] / 3600
     fig, ax = plt.subplots(1, 3, figsize=(16, 4))
-    ax[0].plot(th, vc/3600, "k-", lw=2, label="True")
-    ax[0].plot(th, p_mean/3600, "b-", label=f"TFT mean ({s_mean:.3f})")
-    ax[0].plot(th, p_cons/3600, "r--", label=f"Cons ({s_cons:.3f})")
+    ax[0].plot(th, vc/3600, "k-", lw=2, label="True rul_s")
+    ax[0].plot(th, p_mean/3600, "b-", label=f"mean ({s_mean:.3f})")
+    ax[0].plot(th, p_med/3600, "g--", label=f"median ({s_med:.3f})")
+    ax[0].plot(th, p_cons/3600, "r--", label=f"cons ({s_cons:.3f})")
     ax[0].fill_between(th, (pred_mean-pred_std_seeds)/3600,
-                        (pred_mean+pred_std_seeds)/3600, alpha=0.2, color="b", label="seed±σ")
-    ax[0].set(xlabel="Time(h)", ylabel="RUL(h)", title=f"{val} Multi-Seed TFT")
-    ax[0].legend(fontsize=8)
+                        (pred_mean+pred_std_seeds)/3600, alpha=0.2, color="b")
+    ax[0].set(xlabel="Time(h)", ylabel="RUL(h)", title=f"{val} v18 rul_s")
+    ax[0].legend(fontsize=8); ax[0].grid(alpha=0.3)
     ax[1].plot(vd["t_s"].values/3600, vd["HI"].values, color="darkorange", lw=2)
-    ax[1].axvline(df.loc[df.bearing==val, "t_s"].iloc[fpt_dict[val]]/3600,
-                  ls="--", color="red", label="FPT")
-    ax[1].set(xlabel="Time(h)", ylabel="HI", title=f"{val} DTC-VAE HI"); ax[1].legend()
-    ax[2].bar(["mean","median","cons","ultra"], [s_mean, s_med, s_cons, s_ultra],
-              color=["blue","green","red","purple"])
-    ax[2].set(ylim=(0, 1.05), ylabel="AsymScore", title=f"{val} Strategy Comparison")
-    plt.tight_layout(); plt.savefig(RESULT_DIR / f"{val}.png", dpi=120); plt.close()
+    ax[1].axvline(df.loc[df.bearing==val, "t_s"].iloc[fpt_dict[val]]/3600, ls="--", color="red", label="FPT")
+    ax[1].set(xlabel="Time(h)", ylabel="HI", title=f"{val} HI"); ax[1].legend()
+    ax[2].bar(["mean","med","trim","cons","ultra"], [s_mean, s_med, s_trim, s_cons, s_ultra],
+              color=["blue","green","orange","red","purple"])
+    ax[2].set(ylim=(0, 1.05), ylabel="AsymScore (full)", title=f"{val}")
+    plt.tight_layout(); plt.savefig(RESULT_DIR / f"v22_{val}.png", dpi=120); plt.close()
 
 res = pd.DataFrame(results)
-# 호환성: asym_score 컬럼은 cons로 (제출 전략)
-res["asym_score"] = res["tft_cons"]
-print("\n" + "=" * 70, flush=True); print("  v3 최종 결과 (TFT Multi-Seed)", flush=True); print("=" * 70, flush=True)
+print("\n" + "=" * 70, flush=True); print("  v22 최종 결과 (v18 + 채널 대칭)", flush=True); print("=" * 70, flush=True)
 print(res.to_string(index=False), flush=True)
-print(f"\n  TFT seed mean (5 seeds):   {res.tft_mean.mean():.4f}", flush=True)
-print(f"  TFT seed median:           {res.tft_median.mean():.4f}", flush=True)
-print(f"  TFT trimmed mean (-1):     {res.tft_trim.mean():.4f}  ← 제출 권장", flush=True)
-print(f"  TFT mean - 0.15σ-0.1σs:    {res.tft_cons.mean():.4f}", flush=True)
-print(f"  TFT mean - 0.3σ (ultra):   {res.tft_ultra.mean():.4f}", flush=True)
-print(f"  평균 RMSE:                 {res.rmse_s.mean():.0f} s", flush=True)
-res.to_csv(RESULT_DIR / "lobo_results.csv", index=False)
+print(f"\n  Full mean:     {res.full_mean.mean():.4f}", flush=True)
+print(f"  Full median:   {res.full_med.mean():.4f}", flush=True)
+print(f"  Full trim:     {res.full_trim.mean():.4f}", flush=True)
+print(f"  Full cons:     {res.full_cons.mean():.4f}", flush=True)
+print(f"  Full ultra:    {res.full_ultra.mean():.4f}", flush=True)
+print(f"  Last mean:     {res.last_mean.mean():.4f}", flush=True)
+print(f"  Last median:   {res.last_med.mean():.4f}  ← 핵심 지표", flush=True)
+print(f"  Last trim:     {res.last_trim.mean():.4f}", flush=True)
+print(f"  RMSE 평균:     {res.rmse_s.mean():.0f}s", flush=True)
+res.to_csv(RESULT_DIR / "lobo_v22.csv", index=False)
