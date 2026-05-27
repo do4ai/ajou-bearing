@@ -39,15 +39,17 @@ METHOD_DIR = Path(__file__).resolve().parent
 RESULT_DIR = METHOD_DIR / "results"; RESULT_DIR.mkdir(parents=True, exist_ok=True)
 MODEL_DIR = METHOD_DIR / "models"; MODEL_DIR.mkdir(parents=True, exist_ok=True)
 SEQ_LEN = 10
-TFT_SEEDS = [42, 7, 123, 2026, 99]      # v11: TFT 5개 시드
-BILSTM_SEEDS = [365, 1234, 777, 5050, 9999]   # v11: BiLSTM 5개 시드
-SEEDS = TFT_SEEDS + BILSTM_SEEDS         # 호환성 (저장용)
+TFT_SEEDS = [42, 7, 123, 2026, 99]               # v11 (best) 5개
+BILSTM_SEEDS = [365, 1234, 777, 5050, 9999]      # v11 (best) 5개
+GRU_SEEDS = []
+SEEDS = TFT_SEEDS + BILSTM_SEEDS + GRU_SEEDS
 EPOCHS = 300
 PATIENCE = 120
 AUG_NOISE_STD = 0.035
-TRIM = 3                # 10개 중 worst 3개 제거 → 7개 평균
+TRIM = 3                # v11 best: 10개 중 worst 3 → top 7
 SCORE_LOSS_START = 30
 MIN_EPOCHS = 80
+BILSTM_DM = 64
 
 print("=" * 70); print("  v3: TFT Multi-Seed Ensemble + σ-aware 보수 보정"); print("=" * 70)
 
@@ -248,8 +250,8 @@ class TFTModel(nn.Module):
 
 
 class BiLSTMModel(nn.Module):
-    """다양성 위한 BiLSTM (TFT와 다른 inductive bias)"""
-    def __init__(self, fd, dm=64):
+    """다양성 위한 BiLSTM (TFT와 다른 inductive bias)."""
+    def __init__(self, fd, dm=BILSTM_DM):
         super().__init__()
         self.vsn = nn.Sequential(nn.Linear(fd, fd), nn.Softmax(dim=-1))
         self.proj = nn.Linear(fd, dm)
@@ -263,6 +265,26 @@ class BiLSTMModel(nn.Module):
         a = torch.softmax(self.attn(o).squeeze(-1), dim=1).unsqueeze(-1)
         ctx = (o * a).sum(dim=1)
         return self.fc(ctx).squeeze(-1)
+
+
+class GRUModel(nn.Module):
+    """GRU + Conv1D (다양성 추가)"""
+    def __init__(self, fd, dm=64):
+        super().__init__()
+        self.vsn = nn.Sequential(nn.Linear(fd, fd), nn.Softmax(dim=-1))
+        self.conv1 = nn.Conv1d(fd, dm, 3, padding=1)
+        self.conv2 = nn.Conv1d(dm, dm, 3, padding=1)
+        self.bn1 = nn.BatchNorm1d(dm); self.bn2 = nn.BatchNorm1d(dm)
+        self.gru = nn.GRU(dm, dm, num_layers=2, batch_first=True,
+                          bidirectional=True, dropout=0.2)
+        self.fc = nn.Sequential(nn.Linear(dm * 2, 32), nn.GELU(),
+                                nn.Dropout(0.2), nn.Linear(32, 1))
+    def forward(self, x):
+        w = self.vsn(x); xw = (x * w).transpose(1, 2)
+        c = torch.relu(self.bn1(self.conv1(xw)))
+        c = torch.relu(self.bn2(self.conv2(c))).transpose(1, 2)
+        o, _ = self.gru(c)
+        return self.fc(o[:, -1, :]).squeeze(-1)
 
 
 class AugDS(Dataset):
@@ -335,14 +357,16 @@ for val in TRAIN_NAMES:
     vs = np.array(vs, np.float32); vt_arr = np.array(vt_l, np.float32)
     rul_max = max(tr_t.max(), 1.0); tr_tn = tr_t / rul_max
 
-    # ── 다중 시드 + 다중 아키텍처 학습 ──
-    print(f"    TFT × {len(TFT_SEEDS)} + BiLSTM × {len(BILSTM_SEEDS)} seeds...", flush=True)
+    # ── v14: TFT 5 + BiLSTM 8 (GRU 폐기) ──
+    print(f"    TFT×{len(TFT_SEEDS)} + BiLSTM×{len(BILSTM_SEEDS)} = {len(SEEDS)} 모델", flush=True)
     fold_models = []
     fold_preds = []
     fold_best = []
     fold_archs = []
-    for arch_name, cls, sds in [("TFT", TFTModel, TFT_SEEDS),
-                                  ("BiLSTM", BiLSTMModel, BILSTM_SEEDS)]:
+    arch_list = [("TFT", TFTModel, TFT_SEEDS), ("BiLSTM", BiLSTMModel, BILSTM_SEEDS)]
+    if GRU_SEEDS:
+        arch_list.append(("GRU", GRUModel, GRU_SEEDS))
+    for arch_name, cls, sds in arch_list:
         for sd in sds:
             t0 = time.time()
             model, pred, best = train_model(cls, tr_s, tr_tn, vs, vt_arr, rul_max, sd)
@@ -412,7 +436,7 @@ for val in TRAIN_NAMES:
     joblib.dump(gpr, fold_dir / "gpr.pkl")
     joblib.dump({"scaler": sc2, "rul_max": rul_max, "FC_HI": FC_HI,
                  "TFT_SEEDS": TFT_SEEDS, "BILSTM_SEEDS": BILSTM_SEEDS,
-                 "SEEDS": SEEDS, "SEQ_LEN": SEQ_LEN}, fold_dir / "meta.pkl")
+                 "GRU_SEEDS": GRU_SEEDS, "SEEDS": SEEDS, "SEQ_LEN": SEQ_LEN}, fold_dir / "meta.pkl")
 
     # 시각화
     th = vd["t_s"].values[SEQ_LEN-1:] / 3600
