@@ -1,0 +1,68 @@
+======================================================================
+  v25: v22 + dynamics features
+======================================================================
+
+[1] 피처 로드 (v25_features_dynamics.csv)...
+  Train rows: 466 ({'Train4': 137, 'Train1': 126, 'Train2': 114, 'Train3': 89})
+  총 피처: 271개 (v22 base + dynamics)
+
+[2] LOBO (6 seeds/fold = 3 TFT + 3 BiLSTM)...
+
+  Fold: Val=Train1
+    train_seq=(313, 10, 271)  val_seq=(117, 10, 271)
+      TFT seed=42: best=0.8062  43.6s
+      TFT seed=7: best=0.7689  36.9s
+      TFT seed=123: best=0.8062  42.8s
+      BiLSTM seed=365: best=0.4862  5.8s
+      BiLSTM seed=1234: best=0.7224  4.8s
+      BiLSTM seed=777: best=0.8314  5.1s
+  Full mean=0.7485  med=0.7546
+  Last mean=0.0155  med=1.0000  true=600  pred_med=600
+
+  Fold: Val=Train2
+    train_seq=(325, 10, 271)  val_seq=(105, 10, 271)
+      TFT seed=42: best=0.7918  39.9s
+      TFT seed=7: best=0.7673  39.9s
+      TFT seed=123: best=0.7882  37.4s
+      BiLSTM seed=365: best=0.4428  5.7s
+      BiLSTM seed=1234: best=0.4910  4.4s
+      BiLSTM seed=777: best=0.4910  4.4s
+  Full mean=0.5403  med=0.6683
+  Last mean=0.0008  med=1.0000  true=600  pred_med=600
+
+  Fold: Val=Train3
+    train_seq=(350, 10, 271)  val_seq=(80, 10, 271)
+      TFT seed=42: best=0.3099  35.1s
+      TFT seed=7: best=0.3056  35.9s
+      TFT seed=123: best=0.2901  36.6s
+      BiLSTM seed=365: best=0.3178  4.8s
+      BiLSTM seed=1234: best=0.4951  4.5s
+      BiLSTM seed=777: best=0.4951  4.6s
+  Full mean=0.4435  med=0.4412
+  Last mean=0.0000  med=0.0000  true=600  pred_med=14314
+
+  Fold: Val=Train4
+    train_seq=(302, 10, 271)  val_seq=(128, 10, 271)
+      TFT seed=42: best=0.5314  36.3s
+      TFT seed=7: best=0.4998  38.9s
+      TFT seed=123: best=0.6394  35.3s
+      BiLSTM seed=365: best=0.4516  10.2s
+      BiLSTM seed=1234: best=0.4885  4.1s
+      BiLSTM seed=777: best=0.4885  4.1s
+  Full mean=0.3598  med=0.3099
+  Last mean=0.0000  med=1.0000  true=600  pred_med=600
+
+======================================================================
+  v25 LOBO 결과
+======================================================================
+   val  full_mean  full_med    last_mean     last_med  true_last  pred_last_med                          seeds_best
+Train1   0.748496  0.754588 1.551552e-02 1.000000e+00      600.0     600.000000 0.806,0.769,0.806,0.486,0.722,0.831
+Train2   0.540281  0.668283 7.743394e-04 1.000000e+00      600.0     600.000000 0.792,0.767,0.788,0.443,0.491,0.491
+Train3   0.443547  0.441205 1.928750e-22 1.928750e-22      600.0   14314.261719 0.310,0.306,0.290,0.318,0.495,0.495
+Train4   0.359822  0.309867 1.335702e-08 1.000000e+00      600.0     600.000000 0.531,0.500,0.639,0.452,0.488,0.488
+
+  Full mean:   0.5230
+  Full median: 0.5435
+  Last mean:   0.0041
+  Last median: 0.7500
+  Saved: /Users/gusdn0828/Documents/GitHub/azudae/03_김현우_Ensemble/results/lobo_v25.csv

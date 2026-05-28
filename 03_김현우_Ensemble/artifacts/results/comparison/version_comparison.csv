@@ -1,0 +1,9 @@
+version,full_mean,last_med,combined,note
+v1 (v17 baseline),,,,"cols: ['val_bearing', 'rmse_s', 'tft_mean', 'tft_median', 'tft_trim', 'tft_cons']"
+v2 (v18 EOL focus),0.5582,0.9564,0.6776,
+v4 (v22 chsym),0.5791,1.0,0.7054,
+v6 (v25 dynamics),0.5435,0.75,0.6054,
+v7 (v26 domain adv),,,,missing
+v3 (v17+v18 blend best comb),0.603,0.978,0.715,from blend_v17v18_grid
+v5 (v17+v22 blend best comb),0.599,0.975,0.712,from blend_v17v22_grid (current best)
+v5 (v17+v22 blend best full),0.637,0.308,0.538,high full but risky last

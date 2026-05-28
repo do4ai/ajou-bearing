@@ -1,0 +1,2 @@
+Bearing,match_train,match_end_idx,match_t_s,match_rul_s,dtw_distance,test_HI_last,test_HI_slope5_last,test_HI_d5_last,RUL_v19_combined_s,HI_last,RUL_v17_s,RUL_v22_s,RUL_v24_combined_s
+Test5,Train1,124,74400.0,1200.0,1.3436803797742207,0.9438726902008057,-0.3487589191379704,-0.020274698734283447,10118.3251953125,0.9438726902008056,14644.736328125,600.0,644.3411865234375

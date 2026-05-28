@@ -1,0 +1,59 @@
+======================================================================
+  v26: v25 + multi-source domain adversarial (MADA-lite)
+======================================================================
+
+[1] 피처 로드...
+  Train: 466 rows, Val: 300 rows, features: 271
+
+[2] LOBO (3 TFT seeds, domain-adversarial)...
+
+  Fold: Val=Train1
+    train_seq=(313, 10, 271)  val_seq=(117, 10, 271)  test_seq=(246, 10, 271)
+    n_domains=10
+      seed=42: best=0.8160  83.5s
+      seed=7: best=0.7731  61.1s
+      seed=123: best=0.7760  65.8s
+  Full mean=0.7544  med=0.7619
+  Last mean=1.0000  med=1.0000  true=600  pred_med=600
+
+  Fold: Val=Train2
+    train_seq=(325, 10, 271)  val_seq=(105, 10, 271)  test_seq=(246, 10, 271)
+    n_domains=10
+      seed=42: best=0.7376  73.3s
+      seed=7: best=0.4358  66.9s
+      seed=123: best=0.7564  76.2s
+  Full mean=0.6866  med=0.6487
+  Last mean=0.0001  med=1.0000  true=600  pred_med=600
+
+  Fold: Val=Train3
+    train_seq=(350, 10, 271)  val_seq=(80, 10, 271)  test_seq=(246, 10, 271)
+    n_domains=10
+      seed=42: best=0.3336  75.1s
+      seed=7: best=0.3066  63.4s
+      seed=123: best=0.4082  134.6s
+  Full mean=0.5128  med=0.5120
+  Last mean=0.0000  med=0.0000  true=600  pred_med=6313
+
+  Fold: Val=Train4
+    train_seq=(302, 10, 271)  val_seq=(128, 10, 271)  test_seq=(246, 10, 271)
+    n_domains=10
+      seed=42: best=0.6529  112.6s
+      seed=7: best=0.5506  59.9s
+      seed=123: best=0.5960  63.4s
+  Full mean=0.4557  med=0.4326
+  Last mean=1.0000  med=1.0000  true=600  pred_med=600
+
+======================================================================
+  v26 LOBO 결과 (domain adv)
+======================================================================
+   val  full_mean  full_med    last_mean     last_med  true_last  pred_last_med        seeds_best
+Train1   0.754380  0.761938 1.000000e+00 1.000000e+00      600.0     600.000000 0.816,0.773,0.776
+Train2   0.686608  0.648704 5.103051e-05 1.000000e+00      600.0     600.000000 0.738,0.436,0.756
+Train3   0.512782  0.512026 8.303238e-19 4.669162e-15      600.0    6312.690918 0.334,0.307,0.408
+Train4   0.455671  0.432604 1.000000e+00 1.000000e+00      600.0     600.000000 0.653,0.551,0.596
+
+  Full mean:   0.6024
+  Full median: 0.5888
+  Last mean:   0.5000
+  Last median: 0.7500
+  Saved: /Users/gusdn0828/Documents/GitHub/azudae/03_김현우_Ensemble/results/lobo_v26.csv
