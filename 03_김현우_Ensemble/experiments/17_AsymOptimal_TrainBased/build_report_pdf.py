@@ -50,13 +50,14 @@ def main() -> None:
     print("Building A4 1-page report PDF")
     print("=" * 70)
 
-    # Load data for figures
-    sens_summary = pd.read_csv(RESULT_DIR / "21_submission_summary.csv")
-    per_bearing = pd.read_csv(RESULT_DIR / "18_per_bearing_robust_debug.csv")
+    # Flagship = 앙상블(물리 avg-rate × 비대칭점수-최적 p*) 제출본
+    flagship = pd.read_excel(RESULT_DIR / "42_blend_submission.xlsx")
 
     # Train HI vs RUL stats
     df = pd.read_csv(FEATURE_CSV).fillna(0)
     train = df[df.bearing.isin(TRAIN_NAMES)]
+    hi_last = {b: float(df[df.bearing == b].HI.iloc[-1]) for b in flagship.Bearing}
+    flagship["HI_last"] = flagship.Bearing.map(hi_last)
 
     hi_bands = [(0.0, 0.3), (0.3, 0.6), (0.6, 0.85), (0.85, 1.0)]
     band_stats = []
@@ -85,8 +86,8 @@ def main() -> None:
     ax_h.text(0.02, 0.78, "KSPHM-KIMM 2026 베어링 RUL 예측 기술 보고서",
               transform=ax_h.transAxes, fontsize=14, fontweight="bold", color="white",
               fontname="AppleGothic")
-    ax_h.text(0.02, 0.62, "Train-Based RUL Prediction with Asymmetric-Optimal Per-Bearing Ensemble",
-              transform=ax_h.transAxes, fontsize=8.5, color="#DCE8FF",
+    ax_h.text(0.02, 0.62, "Train-Based Ensemble: Asymmetric-Score-Optimal Point Estimation × Physics Degradation-Rate",
+              transform=ax_h.transAxes, fontsize=8.0, color="#DCE8FF",
               fontname="AppleGothic")
     ax_h.text(0.02, 0.35, "팀: HUFS · 제출일: 2026-06-08", transform=ax_h.transAxes,
               fontsize=8, color=NAVY, fontname="AppleGothic")
@@ -124,8 +125,9 @@ def main() -> None:
                 transform=ax_pl.transAxes, fontsize=8.2, color=TEXT, fontname="AppleGothic")
     pipeline_text = (
         "① 4채널 진동 → ② Fast Kurtogram → ③ Envelope + Order (BPFI/BPFO/BSF/FTF) → "
-        "④ Channel-symmetric → ⑤ DTC-VAE HI + Dynamics (slope/acc/roll_std) → "
-        "⑥ Per-bearing ensemble (5_HIBlend/17_KNN/19_EOLProg/28_EOL) → ⑦ Sensitivity submission"
+        "④ Channel-symmetric → ⑤ DTC-VAE HI(건강지표) → "
+        "⑥-a p* = argmax_p E[asym(p,R)] (HI-KNN K=20, 평가식 직접최적화)  +  "
+        "⑥-b 물리 열화율 RUL = elapsed·(1−HI)/HI → ⑦ 두 추정기 고정 기하평균 앙상블"
     )
     ax_pl.text(0.02, 0.42, pipeline_text, transform=ax_pl.transAxes,
                 fontsize=7.5, color=TEXT, fontname="AppleGothic", wrap=True, va="top")
@@ -150,24 +152,24 @@ def main() -> None:
 
     # ── Section 4: Test별 예측 ──────────────────────────────────────
     ax_t = fig.add_subplot(gs[6:9, 6:12])
-    bearings = per_bearing.Bearing.values
-    preds = per_bearing.RUL_pred_seconds.values / 3600
+    bearings = flagship.Bearing.values
+    preds = flagship.RUL_pred_seconds.values / 3600
     colors = []
-    for hi in per_bearing.HI_last.values:
+    for hi in flagship.HI_last.values:
         if hi < 0.3: colors.append(BLUE)
         elif hi < 0.6: colors.append(GREEN)
         elif hi < 0.85: colors.append(GOLD)
         else: colors.append(RED)
     ax_t.barh(range(len(bearings)), preds, color=colors, alpha=0.85)
-    for i, (b, p, hi) in enumerate(zip(bearings, preds, per_bearing.HI_last.values)):
-        ax_t.text(p + 0.5, i, f"{p:.2f}h (HI={hi:.2f})", va="center",
+    for i, (b, p, hi) in enumerate(zip(bearings, preds, flagship.HI_last.values)):
+        ax_t.text(p + 0.4, i, f"{p:.2f}h (HI={hi:.2f})", va="center",
                    fontsize=7, color=TEXT, fontname="AppleGothic")
     ax_t.set_yticks(range(len(bearings)))
     ax_t.set_yticklabels(bearings, fontsize=8, fontname="AppleGothic")
     ax_t.set_xlabel("RUL (hours)", fontsize=8, fontname="AppleGothic")
-    ax_t.set_title("4. 1순위 제출 (Per-Bearing Robust) — 6 베어링",
+    ax_t.set_title("4. Flagship 제출 (앙상블 avg-rate×p*) — 6 베어링",
                     fontsize=9, fontweight="bold", color=NAVY, fontname="AppleGothic", loc="left")
-    ax_t.set_xlim(0, 18)
+    ax_t.set_xlim(0, 19)
     ax_t.invert_yaxis()
     ax_t.spines[["top", "right"]].set_visible(False)
     ax_t.grid(axis="x", alpha=0.25)
@@ -175,19 +177,18 @@ def main() -> None:
     # ── Section 5: 후보 비교 표 ─────────────────────────────────────
     ax_tbl = fig.add_subplot(gs[10:14, :])
     ax_tbl.axis("off")
-    ax_tbl.text(0.02, 0.95, "5. Candidate Submission 비교 (LOBO vs Sensitivity)",
+    ax_tbl.text(0.02, 0.95, "5. 후보 비교 — 동일 held-out 점 공정 LOBO (+ 부트스트랩)",
                  transform=ax_tbl.transAxes, fontsize=10, fontweight="bold",
                  color=NAVY, fontname="AppleGothic")
     table_data = [
-        ["순위", "후보", "Sensitivity Mean", "LOBO Score", "특징"],
-        ["1순위", "per_bearing_best_mix", "0.488", "—", "베어링별 best mix (최고 sens)"],
-        ["", "(Test5=644, 나머지=28_eol_med)", "", "", ""],
-        ["백업1", "5_HIBlend_combined", "0.399", "0.712", "LOBO 검증된 안정 default"],
-        ["백업2", "19_EOLProgression_Robust", "0.429", "0.750", "HI 곡선 fit (Train EOL bound)"],
-        ["참고", "consensus_asym_weighted", "0.458", "—", "Multi-candidate 합의"],
+        ["역할", "방법", "공정 LOBO", "95% CI", "특징"],
+        ["Flagship", "앙상블 = avg-rate × p* (geo)", "0.633", "[.57,.72]", "두 독립 추정기 고정 기하평균 (0-param)"],
+        ["정확도 anchor", "물리 avg-rate", "0.600", "[.55,.65]", "RUL=elapsed·(1−HI)/HI — 정확도 최선"],
+        ["metric anchor", "p* (asym-argmax)", "0.538", "[.40,.66]", "argmax_p E[asym] — seam-free·Test5 샤프"],
+        ["백업(NN)", "5_HIBlend", "0.712*", "*별 프로토콜", "안정 TFT+BiLSTM anchor"],
     ]
     tbl = ax_tbl.table(cellText=table_data, cellLoc="left", loc="center",
-                        colWidths=[0.08, 0.32, 0.13, 0.10, 0.37])
+                        colWidths=[0.13, 0.30, 0.11, 0.12, 0.34])
     tbl.auto_set_font_size(False)
     tbl.set_fontsize(7)
     tbl.scale(1, 1.4)
@@ -214,15 +215,15 @@ def main() -> None:
                transform=ax_m.transAxes, fontsize=10, fontweight="bold",
                color=NAVY, fontname="AppleGothic")
     insights = [
-        "• 17_AsymOptimal: Test HI-state KNN(K=20) → Train의 실제 RUL 분포 → argmax_p E[A(p,r)] (비대칭 페널티 직접 최적화).",
-        "• 19_EOLProgression_Robust: Train HI 곡선 fit → Test 진행도 추정 → EOL time 역산. LOBO 0.75 (5_HIBlend 0.599 압도).",
-        "• 18_PerBearing_Robust: 9 candidate × HI-band prior grid → 베어링별 expected_score 최대 후보 선택. Mean 0.488.",
-        "• ★선택방법 검증: per-bearing 선택을 train LOBO(25~90% progression 16점, 600s 편향 제거)로 평가 → 0.519 > naive 0.460. overfit 아님.",
-        "• Test5 anomaly: 동일 8.17h 관측에서 Train HI≈0.5인데 Test5만 0.944 → train 분포 밖 비정상 빠른 열화 → 짧은 RUL(644s) 정당.",
+        "• p* (의사결정이론 점추정): Test HI의 Train HI-KNN(K=20) 실제 RUL 분포에서 argmax_p E[asym(p,R)] — 평가식을 목적함수로 한 점추정, 제출값=명시 목적함수 출력(seam 없음).",
+        "• 물리 열화율 (avg-rate): RUL = 경과·(1−HI)/HI. 동일 held-out 점 공정 LOBO 0.600 = train 점추정기 중 정확도 최선.",
+        "• ★앙상블: 두 독립 추정기(의사결정 × 물리) 고정 기하평균(0-param) → 공정 LOBO 0.633, 양쪽 robust 능가(P=0.74~0.88, 분산 감소).",
+        "• 강건성·정직성: K∈[8,40] LOBO 평탄(0.019)·방향 K-불변. n=4라 CI 넓음 → '결정적' 아닌 'robust 우위'로 서술·예비로 확인.",
+        "• Test5 anomaly: 8.17h에 Train HI≈0.48 vs Test5 0.944 → 급속 열화 → 짧은 RUL(앙상블 1254s, 같은 규칙서 자동).",
     ]
     for i, line in enumerate(insights):
-        ax_m.text(0.02, 0.78 - i * 0.13, line, transform=ax_m.transAxes,
-                    fontsize=7.5, color=TEXT, fontname="AppleGothic", va="top", wrap=True)
+        ax_m.text(0.02, 0.80 - i * 0.165, line, transform=ax_m.transAxes,
+                    fontsize=7.3, color=TEXT, fontname="AppleGothic", va="top", wrap=True)
 
     # ── Section 7: Final note ────────────────────────────────────
     ax_f = fig.add_subplot(gs[17:20, :])
@@ -233,16 +234,16 @@ def main() -> None:
                transform=ax_f.transAxes, fontsize=9, fontweight="bold",
                color="white", fontname="AppleGothic")
     ax_f.text(0.02, 0.45,
-               "1순위 = 18_PerBearing_Robust (Test5만 5_HIBlend 644s, 나머지는 28_EOL Specialist 9k~11k, Test3은 17_hybrid 48.9k)",
-               transform=ax_f.transAxes, fontsize=7.5, color="#DCE8FF",
+               "Flagship = 앙상블(avg-rate × p*) : 23910 / 28454 / 48935 / 34245 / 1254 / 44812 초 (Test1~6).  전 값 train 이웃 support 내·600s 하한·임의 clamp 無.",
+               transform=ax_f.transAxes, fontsize=7.2, color="#DCE8FF",
                fontname="AppleGothic")
     ax_f.text(0.02, 0.30,
-               "백업 = 5_HIBlend_combined (LOBO 검증 0.712) + 19_EOLProgression_Robust (LOBO 0.75)",
-               transform=ax_f.transAxes, fontsize=7.5, color="#DCE8FF",
+               "Anchor = avg-rate(정확도 LOBO 0.600) · p*(metric/seam) ;  백업 = 5_HIBlend(LOBO 0.712).  예측 코드는 code.zip 단독 bit-exact 재현.",
+               transform=ax_f.transAxes, fontsize=7.2, color="#DCE8FF",
                fontname="AppleGothic")
     ax_f.text(0.02, 0.13,
-               "위험 분산: 가설 다양화 (sensitivity prior / LOBO-fit / EOL physics)로 robust 보장.",
-               transform=ax_f.transAxes, fontsize=7.5, color=GOLD,
+               "예비 제출(6/1~5) 실측으로 mid-life long/short·Test6 1비트 확정 후 6/8 최종 lock. 위험 분산 = 의사결정 × 물리 × NN 가설 다양화.",
+               transform=ax_f.transAxes, fontsize=7.2, color=GOLD,
                fontname="AppleGothic", style="italic")
 
     out_path = RESULT_DIR / "팀이름_report.pdf"
