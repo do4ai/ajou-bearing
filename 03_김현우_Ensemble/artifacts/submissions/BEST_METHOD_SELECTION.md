@@ -23,6 +23,8 @@ train-only · 임의 clamp 無 · 600s 물리 하한 · β 곱셈보정만.
 | E*(이웃 기대점수) | 0.732 | 0.678 | 0.727 | 0.693 | 0.503 | 0.751 |
 | β0.97 보수 | 28496 | 26747 | 63418 | 31422 | 1164 | 40158 |
 
+> **★ iter61 정직한 보정:** 아래 p\*는 **발표 seam-free·metric-alignment** 축의 최선이나, **정확도 공정 LOBO에선 물리 avg-rate(0.600)가 p\*(0.538)를 robust 능가**(P=0.88, "정확도 공정 재검증" 섹션 참조). 둘 다 mid-life LONG·Test5 SHORT로 **방향 일치**. → **최종 flagship = 2-anchor(avg-rate=정확도 / p\*=metric), 6/1~5 예비 실측이 판정.**
+
 ## ★ 선정의 핵심 — 코드로 확인한 결정적 사실
 
 현재 커밋된 1순위(①, `per_bearing_robust.py`)의 **발표 헤드라인("asym 직접 최적화 argmax_p E[A]")과 실제 절차가 불일치**한다.
@@ -97,8 +99,35 @@ p\*의 유일 하이퍼파라미터 K(HI-KNN 이웃 수)를 K∈{8,12,16,20,28,4
 - **Q&A 방어**: "왜 K=20? K 바꾸면?" → "K∈[8,40]서 LOBO 평탄(Δ0.019)·6셀 방향 전부 불변. K=20은 평탄대 중앙."
 - **정직 disclose**: 절대 크기는 일부 셀(특히 **T3 50k~73k**) 변동 → K-sweep 대역을 그대로 **민감도 구간**으로 보고(과대정밀 회피). T5는 1200~2982로 전부 짧음(anomaly 견고).
 
+## ★ 정확도 공정 재검증 (iter61) — 정직한 보정: 물리 avg-rate가 LOBO 정확도 1위
+
+그동안 후보 LOBO 수치가 **서로 다른 프로토콜**에서 나와 비교 불가였음. 임의 progression 점에
+적용 가능한 train-based 점추정기들을 **동일 held-out 점**에서 공정 채점(`unified_lobo_comparison.py`,
+`41_unified_lobo.csv`, 4-베어링 부트스트랩 256 CI):
+
+| 점추정기 | mean asym | 95% CI | Train3 |
+|---|---|---|---|
+| **avg-rate 물리** | **0.600** | [0.547, 0.646] | 0.518 |
+| HI-regression | 0.598 | [0.374, 0.786] | 0.246 |
+| KNN-q35 | 0.549 | [0.322, 0.717] | 0.217 |
+| p\*-2axis | 0.538 | [0.528, 0.544] | 0.544 |
+| **p\* (flagship)** | **0.538** | [0.395, 0.660] | 0.335 |
+| KNN-median | 0.530 | — | 0.151 |
+
+**P(p\* > avg-rate) = 0.12** → 물리 avg-rate(`RUL=elapsed×(1−HI)/HI`)가 p\*를 **공정 LOBO서 robust하게 능가**(88% 표본).
+
+**정직한 보정:** 앞서 "p\* = 단일 최고"는 **발표 seam-free·창의성** 축에선 타당하나 **정확도(30%, 최대 단일축)에선 과장**이었음. 정확도-best train 점추정기는 **물리 열화율 모델**.
+- **두 방법은 큰 베팅에서 일치**: mid-life LONG + Test5 SHORT. (avg-rate test = 19459/29361/36626/36201/**1310**/48506 ; p\* = 29377/27574/65379/32394/**1200**/41400)
+- 차이는 **크기·EOL 처리**뿐: T3(p\* 65k vs avg 37k, 둘 다 long), **T6(p\* 41k vs avg 49k — 둘 다 LONG, 단 2축 severity는 짧음 주장 → T6 최대 미결)**. avg-rate는 EOL 가속 무시로 Test5를 1310(p\*는 1200으로 더 샤프).
+
+**revised flagship 프레임 = 2 anchor, 예비가 판정:**
+- **정확도 anchor: 물리 avg-rate** (`HUFS_validation_avgrate.xlsx`, LOBO 0.600·CI 최상위, 물리 해석=창의성 문헌 정합).
+- **metric/seam anchor: p\*** (`HUFS_validation_pstar.xlsx`, asym 직접최적화·Test5 최샤프).
+- 둘 다 seam-free·train-only·mid-life LONG → **6/1~5 예비에 둘 다 올려 실측 우열로 6/8 확정**. 사용자 #1=최종 스코어 기준이면 정확도상 avg-rate가 근소 우위, 발표 metric-alignment는 p\* 우위.
+
 ## 예비 리더보드(6/1~5) 결정 실험
-- **Day1**: p\*(mid-life LONG) 제출 = 메인 백본 실측 기준선.
+- **Day1**: 정확도 anchor **avg-rate**(LOBO 0.600) + metric anchor **p\*** 동시 제출 → 실측 우열 확보.
+- **Day1(구)**: p\*(mid-life LONG) 제출 = 메인 백본 실측 기준선.
 - **Day2**: 대조군 ①(mid-life SHORT ~10k) 제출. 두 벡터는 T3·T5 방향이 같아 **점수차 거의 전부가 mid-life long/short 식별**.
 - p\* ≫ ① → LONG 확증 → 6/8 메인=p\* 동결. ① ≥ p\* → mid-life만 SHORT 재추정(엔진 동일, 가정만 데이터로 갱신).
 - **가드레일**: per-cell 튜닝 금지(1비트만), 비결정적이면 일반화 견고한 p\* 유지, train-based 원칙 보호 위해 공개 disclose.
