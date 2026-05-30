@@ -145,6 +145,13 @@ avg-rate vs p\*를 **고를** 필요 없음 — **고정(0-param) 기하평균**
 - Test3=48934(원 B와 사실상 일치), Test5=1254(짧음), mid-life·T6 LONG — 두 anchor의 방향 일치를 그대로 계승, 크기는 중앙값화.
 - **정직 caveat**: n=4라 블렌드 CI도 넓고(0.570~0.716) avg-rate와 겹침 — "robust 우위(P=0.74~0.88)"이지 "결정적"은 아님. mid-life LONG·T6는 여전히 예비 실측 판정 대상.
 
+## 예측구간 (iter64) — flagship 앙상블의 LOBO-잔차 conformal (점추정 불변·additive)
+
+`conformal_ensemble.py`(`44_conformal_ensemble.csv`): 앙상블 규칙의 LOBO held-out Er(%) 경험분포 → 테스트 점추정에 split-conformal 유사 90% 구간 부여.
+- **median Er = +9.0%** (구조적 보수=이른 예측 경향) → 2.5× late 페널티에 정합(asym-최적의 자연 귀결).
+- 90% 구간(시간): T1 6.64[5.0,15.7] · T2 7.90[6.0,18.7] · T3 13.59[10.3,32.2] · T4 9.51[7.2,22.5] · **T5 0.35[0.26,0.83]** · T6 12.45[9.4,29.5].
+- **Test5는 90% 상한도 0.83h(<1h)** → 짧은 RUL anomaly가 불확실성 하에서도 robust. 구간 폭 큼 = n=4 한계의 정직한 반영(과대정밀 회피). **점추정은 제출본 불변(순수 additive)**.
+
 ## 예비 리더보드(6/1~5) 결정 실험
 - **Day1**: ★ **앙상블(avg×p\*)** 메인 + 정확도 anchor **avg-rate** + metric anchor **p\*** 동시 제출 → 앙상블이 실제로 단일을 이기는지 실측 확인.
 - **Day1(구)**: 정확도 anchor **avg-rate**(LOBO 0.600) + metric anchor **p\*** 동시 제출 → 실측 우열 확보.
