@@ -24,9 +24,20 @@
 
 ---
 
-## 1. 제출 후보 (artifacts/submissions/) — 6종, 가설별 정리
+## 1. 제출 후보 (artifacts/submissions/) — 가설별 정리
 
 베어링 HI(진행도): Test1=0.46, Test2=0.50, Test3=0.16, Test4=0.45, **Test5=0.94(EOL 임박)**, Test6=0.41.
+
+### ★ FLAGSHIP (메인, 재-base) — p* 비대칭점수-최적 점추정
+| 파일 | T1 | T2 | T3 | T4 | T5 | T6 | 근거 |
+|---|---|---|---|---|---|---|---|
+| **`HUFS_validation_pstar.xlsx`** (37_PStar) | 29377 | 27574 | 65379 | 32394 | **1200** | 41400 | `p*=argmax_p E[asym(p,R)]` over train HI-KNN(K=20). 헤드라인을 *실제로* 구현하는 엔진. LOBO 0.5377(fold 정직공개). 전 값 train 이웃 support 내 |
+| `HUFS_validation_pstar_conservative.xlsx` | 28496 | 26747 | 63418 | 31422 | 1164 | 40158 | p* × β0.97 (23_beta_sweep robust_mean 지배) |
+
+> **왜 flagship 재-base:** 멀티에이전트 검증+코드 확인 결과, 구 1순위 ①(`per_bearing_robust.py`)은 9-벡터 **메타-셀렉터**라 발표 헤드라인("asym 직접최적화")과 절차 불일치(narrative seam). p\*가 그 헤드라인을 실제로 구현. 상세 = `BEST_METHOD_SELECTION.md`.
+> **caveat:** mid-life LONG은 HI-transfer **베팅**(Train3 fold 0.335 붕괴), T6=41400은 severity 증거(짧음)와 충돌 → **6/1~5 예비로 1비트 실측 판정**. ①은 그 **대조군(Day2)**.
+
+### A) "mid-life 짧음(~10k)" 가설 — 대조군/평가식 메타선택 계열
 
 ### A) "mid-life 짧음(~10k)" 가설 — 평가식 직접최적화 계열
 | 파일 | T1 | T2 | T3 | T4 | T5 | T6 | 근거 |
@@ -91,10 +102,10 @@
 
 ---
 
-## 6. 남은 사용자 결정/액션
+## 6. 남은 결정/액션
 
-- [ ] **1순위 트랙 확정** — iter57로 A 전제 반증됨. 후보: ① B(1순위) 유지 ② 증거-best 혼합 ③ 예비 점수 보고 결정. (현재 미확정)
-- [ ] **팀명 확정** (현재 HUFS 가정)
-- [ ] **26 deprecation 문서반영** (A 전제 무효 명시) — 승인 시 실행
-- [ ] **report.pdf 1순위 narrative 확정** — 트랙 확정 후
-- [ ] **git commit** (승인 시)
+- [x] **flagship 확정 = p\*** (`HUFS_validation_pstar.xlsx`). ①은 예비 Day2 대조군으로 강등, 26(A)는 별도셋 전제 반증으로 대안 기록용.
+- [ ] **팀명 확정** (현재 HUFS 가정) → `python3 tools/preflight_check.py <팀명>`
+- [ ] **report.pdf를 p\* flagship narrative로 갱신** (현 report는 구 ① 기준 — 6/8 전 교체 필요)
+- [ ] **6/1 예비**: Day1 p\* → Day2 ① 대조 → mid-life 1비트 판정 → 6/8 lock
+- [ ] **git commit** (사용자 승인 시 / 본 작업분은 승인됨)

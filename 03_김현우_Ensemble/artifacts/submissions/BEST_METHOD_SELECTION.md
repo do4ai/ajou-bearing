@@ -1,0 +1,81 @@
+# 최고의 방법 선정 — 비대칭점수-최적 점추정 (p*)
+
+> 멀티에이전트 종합심사(6축 매핑 → 3관점 패널 → 적대적 검증 → 종합) + 코드 직접 재확인 결과.
+> 챌린지 3대 목표(파이널 스코어 최고점 / 과적합 방지 / 심사기준 정합)에 매핑한 단일 최고 방법.
+
+## 결론
+
+**방법:** 각 베어링의 마지막 HI에서 **train 전체의 HI-KNN(K=20) 이웃의 실제 rul_s 분포**를 잡고,
+그 분포에 대해 **`p* = argmax_p E[asym_score(p, R)]`** 를 푼다.
+평가식(비대칭, 늦은예측 2.5×)을 **그대로 목적함수**로 한 의사결정이론 점추정. 한 규칙에서 6값이 전부 도출.
+train-only · 임의 clamp 無 · 600s 물리 하한 · β 곱셈보정만.
+
+**구현/산출:** `experiments/17_AsymOptimal_TrainBased/p_star_estimator.py`
+→ `artifacts/results/.../37_pstar_submission.xlsx` = `artifacts/submissions/HUFS_validation_pstar.xlsx` (flagship).
+
+**flagship 제출값 (전부 train 이웃 support 내, ≥600s):**
+
+| | Test1 | Test2 | Test3 | Test4 | Test5 | Test6 |
+|---|---|---|---|---|---|---|
+| HI | 0.46 | 0.50 | 0.16 | 0.45 | 0.94 | 0.41 |
+| 이웃 RUL med | 36900 | 30900 | 72900 | 37500 | 3600 | 47400 |
+| **p\* (초)** | **29377** | **27574** | **65379** | **32394** | **1200** | **41400** |
+| E*(이웃 기대점수) | 0.732 | 0.678 | 0.727 | 0.693 | 0.503 | 0.751 |
+| β0.97 보수 | 28496 | 26747 | 63418 | 31422 | 1164 | 40158 |
+
+## ★ 선정의 핵심 — 코드로 확인한 결정적 사실
+
+현재 커밋된 1순위(①, `per_bearing_robust.py`)의 **발표 헤드라인("asym 직접 최적화 argmax_p E[A]")과 실제 절차가 불일치**한다.
+- ① 실제 코드(line 40): `best_c = max(means, key=means.get)` — **9개 사전계산 모델출력**(28_eol_med, 5_HIBlend 등) 중 sensitivity-grid 평균 최고를 고르는 **메타-셀렉터**. argmax_p E[asym]를 풀지 않는다.
+- 그 헤드라인을 *실제로* 구현하는 엔진은 `midlife_headtohead.py`의 p\* (line 64–66 `grid[argmax E_neigh[asym]]`).
+- → "stated objective가 제출 숫자를 만드는가?" Q&A에 ①은 "아니오", p\*는 "예". **발표 30% 축 최대 약점(narrative seam)을 p\* 채택으로 제거.**
+
+## 3대 목표 매핑
+
+**1) 파이널 스코어 최고점 (정확도 30%)**
+- p\*는 베어링별 평가식 기대값을 직접 최대화(metric-as-objective). 같은 규칙에서 **Test5는 자동으로 짧게(1200, 근-EOL 이웃 분포의 비대칭-최적점)**, mid-life/저진행은 길게 도출.
+- ⚠ mid-life LONG(~30k)·T3 LONG(65379)은 **"HI가 베어링 간 전이된다"는 가정 하의 최적**. 부트스트랩상 트랙 우열은 비결정(P승=0.42, CI 전면중첩). → **6/1~5 예비 리더보드로 mid-life long/short 1비트 실측 판정**(아래).
+
+**2) 과적합 방지**
+- **단일 생성규칙** → per-cell 수동조립 0 (⑤의 조립 표면 / ④의 단일 게이트 / ①의 9-벡터 메타선택 구조적 제거).
+- **비순환**: p\*는 다른 제출후보(A/B)로 학습되지 않은 독립 train KNN 분포의 argmax → in-sample 과적합 없음.
+- 모든 p\* ∈ [이웃 lo, 이웃 hi] + ≥600s (외삽·임의값 없음, 자동 검증 통과).
+- 노출면 = HI-transfer 가정 **하나**뿐, 그것만 예비로 검증·공개. 부풀린 LOBO(⑥)·저신뢰 게이트(④) 미사용.
+
+**3) 심사기준 정합**
+- **발표 30%**: seam 제거(제출=목적함수 출력). 4대 메시지(train-based / asym 직접최적화 / per-bearing HI-band / Test5 anomaly)가 한 규칙에서 분절 없이 파생.
+- **창의성 10%**: 의사결정이론 점추정 — 블랙박스 DL과 명확 차별, 라벨·코드 일치.
+- **합리성 10%**: 아래 LOBO fold 분산·부트스트랩 CI 중첩을 헤드라인 정직성으로 제시.
+- **우수성 20%**: 어려운 세 구간(EOL T5 / 저진행 T3 / mid-life)을 한 규칙이 자동 처리.
+
+## LOBO 재현 (정직한 일반화 검증) — `37_pstar_lobo.csv`
+
+held-out 베어링 progression에 p\* 규칙 적용(이웃은 나머지 3 train만 → out-of-bearing):
+
+| held | fold mean asym |
+|---|---|
+| Train1 | 0.699 |
+| Train2 | 0.543 |
+| Train3 | **0.335** (HI-transfer 붕괴 — 정직 공개) |
+| Train4 | 0.574 |
+| **전체** | **0.5377** (range 0.364) |
+
+→ LOBO 0.5377은 ⑥의 부풀린 0.750(Train3 fold 8e-15 아티팩트)보다 **정직**하고, HI-transfer 진단(0.552)과 정합. **mid-life long은 "검증된 사실"이 아니라 "예비로 판정할 베팅"**임을 이 분산이 보여준다.
+
+## 정직한 caveat (반드시 이 프레임)
+1. mid-life LONG = 베팅(HI-transfer가 Train3에서 붕괴). "검증된 사실" 주장 금지.
+2. **T6=41400이 최대 약점 셀**: 2축 energy-severity(energy 23.3=train EOL 2배=숨은 급성)는 T6를 짧게(~3000) 봄 → p\*(이웃 argmax)와 충돌. 예비 Day3 실측 검증 필요.
+3. E*가 E_A·E_B를 다 이기는 건 **같은 목적함수의 argmax라 당연(천장)** — 우월성 증거 아님. "최고 기대점수"가 아니라 "**가장 방어가능·과적합 없는 단일 원리**"로 주장.
+4. β는 0.95가 아니라 **0.97**(23_beta_sweep robust_mean 0.4898 지배).
+
+## 예비 리더보드(6/1~5) 결정 실험
+- **Day1**: p\*(mid-life LONG) 제출 = 메인 백본 실측 기준선.
+- **Day2**: 대조군 ①(mid-life SHORT ~10k) 제출. 두 벡터는 T3·T5 방향이 같아 **점수차 거의 전부가 mid-life long/short 식별**.
+- p\* ≫ ① → LONG 확증 → 6/8 메인=p\* 동결. ① ≥ p\* → mid-life만 SHORT 재추정(엔진 동일, 가정만 데이터로 갱신).
+- **가드레일**: per-cell 튜닝 금지(1비트만), 비결정적이면 일반화 견고한 p\* 유지, train-based 원칙 보호 위해 공개 disclose.
+
+## 후보 위상 (재-base 후)
+- **flagship(메인)**: `HUFS_validation_pstar.xlsx` (p\*) + `_pstar_conservative.xlsx` (×β0.97)
+- **대조군(예비 Day2)**: `HUFS_validation_1순위.xlsx` (① 메타-셀렉터, mid-life short)
+- **백업/대안**: 백업1(5_HIBlend) · 백업2(19_EOLProg) · finaltest_robust/T3fix(26, 별도셋 전제 반증으로 강등)
+- 8 validation 후보 전부 preflight PASS, 7종 source bit-exact.

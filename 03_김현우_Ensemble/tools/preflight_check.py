@@ -104,7 +104,9 @@ def main() -> None:
     print("\n[4] 후보 ↔ source 일관성 (4종 모두)")
     R = ENSEMBLE / "artifacts/results"
     cand_src = [
-        ("1순위", "17_AsymOptimal_TrainBased/18_per_bearing_robust_submission.xlsx"),
+        ("pstar", "17_AsymOptimal_TrainBased/37_pstar_submission.xlsx"),                       # flagship (재-base)
+        ("pstar_conservative", "17_AsymOptimal_TrainBased/37_pstar_conservative.xlsx"),         # flagship × β0.97
+        ("1순위", "17_AsymOptimal_TrainBased/18_per_bearing_robust_submission.xlsx"),           # 대조군(메타-셀렉터)
         ("1순위_conservative", "17_AsymOptimal_TrainBased/23_per_bearing_beta095_submission.xlsx"),
         ("백업1", "05_HIBlend_Baseline_ChannelSym/submission_v24_v17v22_combined.xlsx"),
         ("백업2", "17_AsymOptimal_TrainBased/19_eol_progression_robust_submission.xlsx"),
