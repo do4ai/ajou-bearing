@@ -106,7 +106,8 @@ def main() -> None:
     cand_src = [
         ("pstar", "17_AsymOptimal_TrainBased/37_pstar_submission.xlsx"),                       # flagship: metric/seam anchor
         ("pstar_conservative", "17_AsymOptimal_TrainBased/37_pstar_conservative.xlsx"),         # flagship × β0.97
-        ("avgrate", "32_DegradationRate_RUL/32_avgrate_submission.xlsx"),                       # accuracy anchor (LOBO-best 0.600)
+        ("avgrate", "32_DegradationRate_RUL/32_avgrate_submission.xlsx"),                       # accuracy anchor (LOBO 0.600)
+        ("blend", "17_AsymOptimal_TrainBased/42_blend_submission.xlsx"),                        # ★ geo-ensemble(avg-rate×p*), LOBO 0.633 robust > singles
         ("1순위", "17_AsymOptimal_TrainBased/18_per_bearing_robust_submission.xlsx"),           # 대조군(메타-셀렉터)
         ("1순위_conservative", "17_AsymOptimal_TrainBased/23_per_bearing_beta095_submission.xlsx"),
         ("백업1", "05_HIBlend_Baseline_ChannelSym/submission_v24_v17v22_combined.xlsx"),

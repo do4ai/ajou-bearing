@@ -5,11 +5,12 @@ Pre-flight Manifest — 팀 HUFS
 HUFS_validation_1순위.xlsx                            5104   34ddec5b  OK
 HUFS_validation_1순위_conservative.xlsx               5171   882736e5  OK
 HUFS_validation_avgrate.xlsx                        5031   f5739089  OK
+HUFS_validation_blend.xlsx                          5115   3bb1c368  OK
 HUFS_validation_finaltest_T3fix.xlsx                5083   9c931712  OK
 HUFS_validation_finaltest_robust.xlsx               5091   c9e97b92  OK
 HUFS_validation_pstar.xlsx                          5080   2700804e  OK
 HUFS_validation_pstar_conservative.xlsx             5080   198803e0  OK
 HUFS_validation_백업1.xlsx                            5101   4b391b4a  OK
 HUFS_validation_백업2.xlsx                            5100   d2c9df31  OK
-HUFS_code.zip                                    4293809   f6acc269  210files/69py
+HUFS_code.zip                                    4302544   9ae6e3f0  213files/70py
 HUFS_report.pdf                                   166700   4a3f238a  PDF

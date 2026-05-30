@@ -23,7 +23,7 @@ train-only · 임의 clamp 無 · 600s 물리 하한 · β 곱셈보정만.
 | E*(이웃 기대점수) | 0.732 | 0.678 | 0.727 | 0.693 | 0.503 | 0.751 |
 | β0.97 보수 | 28496 | 26747 | 63418 | 31422 | 1164 | 40158 |
 
-> **★ iter61 정직한 보정:** 아래 p\*는 **발표 seam-free·metric-alignment** 축의 최선이나, **정확도 공정 LOBO에선 물리 avg-rate(0.600)가 p\*(0.538)를 robust 능가**(P=0.88, "정확도 공정 재검증" 섹션 참조). 둘 다 mid-life LONG·Test5 SHORT로 **방향 일치**. → **최종 flagship = 2-anchor(avg-rate=정확도 / p\*=metric), 6/1~5 예비 실측이 판정.**
+> **★ 최종 권장(iter62):** 아래 p\*는 **발표 seam-free·metric-alignment** 축 최선, 물리 **avg-rate**는 **정확도 LOBO 최선(0.600 > p\* 0.538, P=0.88)**. 둘은 경쟁이 아니라 **결합**: 고정 기하평균 앙상블 **avg×p\* = 0.633**이 둘 다 robust 능가(0-param·과적합無). → **단일 최고 방법 = 두 추정기 기하평균 앙상블** (`HUFS_validation_blend.xlsx` = 23909/28454/48934/34245/1254/44812). 상세 "종합(iter62)" 섹션. (n=4라 결정적 아님 → 6/1~5 예비 실측 확인.)
 
 ## ★ 선정의 핵심 — 코드로 확인한 결정적 사실
 
@@ -125,8 +125,29 @@ p\*의 유일 하이퍼파라미터 K(HI-KNN 이웃 수)를 K∈{8,12,16,20,28,4
 - **metric/seam anchor: p\*** (`HUFS_validation_pstar.xlsx`, asym 직접최적화·Test5 최샤프).
 - 둘 다 seam-free·train-only·mid-life LONG → **6/1~5 예비에 둘 다 올려 실측 우열로 6/8 확정**. 사용자 #1=최종 스코어 기준이면 정확도상 avg-rate가 근소 우위, 발표 metric-alignment는 p\* 우위.
 
+## ★★ 종합 (iter62) — 고정 기하평균 앙상블이 두 anchor를 모두 능가 (2-anchor 긴장 해소)
+
+avg-rate vs p\*를 **고를** 필요 없음 — **고정(0-param) 기하평균**이 둘 다 robust하게 능가(`blend_estimators.py`, `42_blend_lobo.csv`):
+
+| 방법 | mean asym | 95% CI | P(>avg-rate) |
+|---|---|---|---|
+| **avg×HIreg (geo)** | **0.636** | [0.560,0.712] | **0.88** |
+| **avg×p\* (geo)** | **0.633** | [0.570,0.716] | 0.74 |
+| avg×p\*×HIreg (geo) | 0.626 | [0.535,0.725] | 0.68 |
+| avg-rate (최선 단일) | 0.600 | [0.547,0.646] | — |
+| p\* | 0.538 | [0.395,0.660] | 0.12 |
+
+**avg-rate를 포함한 모든 기하-블렌드가 단일 최선을 능가** → 체리픽 아닌 **분산 감소(variance reduction)** 의 robust 증거. 학습 weight 無(0-param) → 과적합 표면 없음. 블렌드 하한 CI(0.560)도 avg-rate 하한(0.547)보다 높음.
+
+**→ 최종 단일 최고 방법 = 두 독립 train-based 추정기의 고정 기하평균 앙상블.** 권장 = **avg-rate × p\*** (`HUFS_validation_blend.xlsx`): 두 flagship anchor(물리 열화율 + 비대칭점수-최적 의사결정)를 결합해 가장 깔끔한 서사 + 정확도 0.633(P=0.74). (최고 LOBO는 avg×HIreg 0.636/P0.88이나 HI-reg는 단독 고변동·서사 약함 → 노이즈 내 동급이면 anchor 결합형 채택.)
+
+**앙상블 제출값** (= 두 anchor 제출값의 베어링별 기하평균): **23909 / 28454 / 48934 / 34245 / 1254 / 44812**.
+- Test3=48934(원 B와 사실상 일치), Test5=1254(짧음), mid-life·T6 LONG — 두 anchor의 방향 일치를 그대로 계승, 크기는 중앙값화.
+- **정직 caveat**: n=4라 블렌드 CI도 넓고(0.570~0.716) avg-rate와 겹침 — "robust 우위(P=0.74~0.88)"이지 "결정적"은 아님. mid-life LONG·T6는 여전히 예비 실측 판정 대상.
+
 ## 예비 리더보드(6/1~5) 결정 실험
-- **Day1**: 정확도 anchor **avg-rate**(LOBO 0.600) + metric anchor **p\*** 동시 제출 → 실측 우열 확보.
+- **Day1**: ★ **앙상블(avg×p\*)** 메인 + 정확도 anchor **avg-rate** + metric anchor **p\*** 동시 제출 → 앙상블이 실제로 단일을 이기는지 실측 확인.
+- **Day1(구)**: 정확도 anchor **avg-rate**(LOBO 0.600) + metric anchor **p\*** 동시 제출 → 실측 우열 확보.
 - **Day1(구)**: p\*(mid-life LONG) 제출 = 메인 백본 실측 기준선.
 - **Day2**: 대조군 ①(mid-life SHORT ~10k) 제출. 두 벡터는 T3·T5 방향이 같아 **점수차 거의 전부가 mid-life long/short 식별**.
 - p\* ≫ ① → LONG 확증 → 6/8 메인=p\* 동결. ① ≥ p\* → mid-life만 SHORT 재추정(엔진 동일, 가정만 데이터로 갱신).
