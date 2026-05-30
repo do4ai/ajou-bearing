@@ -1,0 +1,7 @@
+bearing,HI,energy_ratio,rms_multi,severe,regime,predB,predA
+Test1,0.463,2.66,0.18,False,mid/early(긺),10067,32035
+Test2,0.5,5.48,0.284,False,mid/early(긺),10998,33556
+Test3,0.165,3.74,0.218,False,mid/early(긺),48900,6449
+Test4,0.448,4.1,0.216,False,mid/early(긺),9545,14113
+Test5,0.944,10.91,0.399,True,EOL(짧음),644,644
+Test6,0.41,23.34,0.612,True,EOL(짧음),10275,3000

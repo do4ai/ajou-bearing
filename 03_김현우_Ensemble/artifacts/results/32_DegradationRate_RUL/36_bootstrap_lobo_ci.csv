@@ -1,0 +1,7 @@
+kind,method,mean,lo,hi
+ci,HI_only,0.598,0.374,0.786
+ci,avg_rate,0.611,0.524,0.697
+ci,phys_gated,0.599,0.491,0.686
+winprob,phys_gated>avg_rate,0.42,,
+winprob,phys_gated>HI_only,0.55,,
+winprob,avg_rate>HI_only,0.56,,

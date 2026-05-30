@@ -33,7 +33,13 @@
 | 13 | `13_EOLHazardGate_Calibrator` | new | `experiments/13_EOLHazardGate_Calibrator/` | `artifacts/results/13_EOLHazardGate_Calibrator/` |
 | 14 | `14_RPMAwareOrderFeatures` | new | `experiments/14_RPMAwareOrderFeatures/` | `artifacts/results/14_RPMAwareOrderFeatures/` |
 | 15 | `15_TrajectoryKNN_DTW_RUL` | new | `experiments/15_TrajectoryKNN_DTW_RUL/` | `artifacts/results/15_TrajectoryKNN_DTW_RUL/` |
-| 16 | `16_ScoreAware_CalibratedEnsemble` | new | `experiments/16_ScoreAware_CalibratedEnsemble/` | `artifacts/results/16_ScoreAware_CalibratedEnsemble/` |
+| 16 | `16_ScoreAware_CalibratedEnsemble` | new (재설계: 임의 clamp 제거) | `experiments/16_ScoreAware_CalibratedEnsemble/` | `artifacts/results/16_ScoreAware_CalibratedEnsemble/` |
+| **17** | `17_AsymOptimal_TrainBased` | **new (train-based KNN + 비대칭 페널티 직접 최적화)** | `experiments/17_AsymOptimal_TrainBased/` | `artifacts/results/17_AsymOptimal_TrainBased/` |
+| **18** | `18_PerBearing_Robust` | **new (per-bearing best candidate selection, sens 0.488)** | `experiments/17_AsymOptimal_TrainBased/per_bearing_robust.py` | `artifacts/results/17_AsymOptimal_TrainBased/18_per_bearing_robust_*.{csv,xlsx}` |
+| **19** | `19_EOLProgression_Robust` | **new (Train HI 곡선 fit + EOL bound cap, LOBO 0.75)** | `experiments/17_AsymOptimal_TrainBased/eol_progression_robust.py` | `artifacts/results/17_AsymOptimal_TrainBased/19_eol_progression_robust_*.csv` |
+| **20** | `20_Consensus` | **new (train-based candidate 합의)** | `experiments/17_AsymOptimal_TrainBased/consensus.py` | `artifacts/results/17_AsymOptimal_TrainBased/20_consensus*.{csv,xlsx}` |
+| **21** | `21_SubmissionMatrix` | **new (LOBO vs Sensitivity 종합)** | `experiments/17_AsymOptimal_TrainBased/submission_matrix.py` | `artifacts/results/17_AsymOptimal_TrainBased/21_submission*.csv` |
+| **28** | `28_EOLRegressor_Specialist` | **new (Train rul_s≤15000 GBM+RF+ET 앙상블)** | `experiments/28_EOLRegressor_Specialist/` | `artifacts/results/28_EOLRegressor_Specialist/` |
 
 ## Artifacts
 
@@ -66,18 +72,67 @@ bash run/run_13_eol_hazard_gate.sh
 bash run/run_14_rpm_order_features.sh
 bash run/run_15_trajectory_knn_dtw.sh
 bash run/run_16_scoreaware_ensemble.sh
+bash run/run_05_hiblend_anchor.sh
+bash run/run_final_anchor_then_26.sh
+bash run/run_27_eol_classifier.sh
+bash run/run_final_anchor_26_27.sh
 ```
 
 `13`, `15`, `16`은 새 구조에서 재실행 검증 완료. `14`는 원진동 전체 재처리라 시간이 오래 걸리지만 wrapper와 경로 보정은 완료되어 있다.
 
-## Latest Submission Candidates
+`05 → 26` final-ready flow도 새 구조에서 재실행 검증 완료.
 
-| 후보 | 파일 | 성향 |
-|------|------|------|
-| 추천 비교 후보 | `artifacts/results/16_ScoreAware_CalibratedEnsemble/16_scoreaware_balanced_submission.xlsx` | `5_HIBlend` 기반, Test6 6000s clamp |
-| 보수 후보 | `artifacts/results/16_ScoreAware_CalibratedEnsemble/16_scoreaware_safe_submission.xlsx` | Test4 8400s, Test6 6000s, Test5 644s |
-| 공격 후보 | `artifacts/results/16_ScoreAware_CalibratedEnsemble/16_scoreaware_aggressive_submission.xlsx` | pass 구간은 `9_DomainAdvBlend`, risk 구간은 safe clamp |
-| 기존 안정 후보 | `artifacts/results/05_HIBlend_Baseline_ChannelSym/submission_v24_v17v22_combined.xlsx` | 기존 best, Test6 clamp 없음 |
+최종 테스트 베어링 이름을 직접 지정하려면:
+
+```bash
+TARGET_NAMES=Final1,Final2,Final3 bash run/run_final_anchor_then_26.sh
+TARGET_NAMES=Final1,Final2,Final3 bash run/run_final_anchor_26_27.sh
+```
+
+## Latest Submission Candidates (v26 Train-Based)
+
+> 임의 clamp 폐기. 모든 출력은 Train data로 학습된 회귀값. 600s 물리 하한만 허용.
+> 자세한 의사결정: `artifacts/submissions/SUBMISSION_README.md`.
+
+| 우선순위 | 파일 | 전략 | Sensitivity Mean | LOBO Score |
+|---------|------|------|------------------|------------|
+| **1순위** | `artifacts/submissions/팀이름_validation_1순위.xlsx` | `18_PerBearing_Robust` (베어링별 best mix) | **0.488** | — |
+| **백업1** | `artifacts/submissions/팀이름_validation_백업1.xlsx` | `5_HIBlend_combined` (LOBO 검증 default) | 0.399 | **0.712** |
+| **백업2** | `artifacts/submissions/팀이름_validation_백업2.xlsx` | `19_EOLProgression_Robust` (HI 곡선 fit) | 0.429 | **0.750** |
+
+### 1순위 베어링별 선택
+
+| Bearing | HI | 선택 모델 | 예측 (s) |
+|---------|----|-----------|---------|
+| Test1 | 0.46 | 28_eol_cons | 10,067 |
+| Test2 | 0.50 | 28_eol_med | 10,998 |
+| Test3 | 0.16 | 17_hybrid | 48,900 |
+| Test4 | 0.45 | 28_eol_med | 9,545 |
+| **Test5** | **0.94** | **5_HIBlend** | **644** |
+| Test6 | 0.41 | 28_eol_med | 10,275 |
+
+### 보고서·발표
+
+| 산출물 | 파일 |
+|--------|------|
+| Report PDF (A4 1페이지) | `artifacts/results/17_AsymOptimal_TrainBased/팀이름_report.pdf` |
+| PPT addendum (12 슬라이드) | `~/sensspace/projects/아주대/4_outputs/KSPHM_KIMM_RUL_v26_방법론_설명_HUFS_addendum.pptx` |
+| Sensitivity heatmap | `artifacts/results/17_AsymOptimal_TrainBased/sensitivity_heatmap.png` |
+| Per-bearing comparison | `artifacts/results/17_AsymOptimal_TrainBased/per_bearing_comparison.png` |
+
+최종 테스트 제출 권장 flow:
+
+```bash
+TARGET_NAMES=Final1,Final2,Final3 bash run/run_final_anchor_26_27.sh
+```
+
+Final test용 후보는 public Validation 후보와 분리한다. 최종 테스트셋 공개 후 `26_FinalRobust_LOBOFrozenSelector`에서 Train1~4 LOBO 기준으로 freeze된 규칙만 적용한다.
+
+과적합 방지 기준:
+
+- 상세 문서: `docs/FINAL_ANTI_OVERFIT_PROTOCOL.md`
+- public Validation/Test1~6에 맞춘 hand tuning은 final 후보에서 제외
+- final test에는 fixed feature, fixed threshold, fixed KNN/window만 적용
 
 ## Path Utility
 

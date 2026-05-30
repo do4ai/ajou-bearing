@@ -1,0 +1,12 @@
+Pre-flight Manifest — 팀 HUFS
+전체 상태: PASS
+
+파일                                                    크기        sha  결과
+HUFS_validation_1순위.xlsx                            5104   34ddec5b  OK
+HUFS_validation_1순위_conservative.xlsx               5171   882736e5  OK
+HUFS_validation_finaltest_T3fix.xlsx                5083   9c931712  OK
+HUFS_validation_finaltest_robust.xlsx               5091   c9e97b92  OK
+HUFS_validation_백업1.xlsx                            5101   4b391b4a  OK
+HUFS_validation_백업2.xlsx                            5100   d2c9df31  OK
+HUFS_code.zip                                    4249733   1fef60e8  195files/64py
+HUFS_report.pdf                                   166700   4a3f238a  PDF

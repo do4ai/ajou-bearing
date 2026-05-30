@@ -102,3 +102,60 @@
 2. `14_RPMAwareOrderFeatures`로 order feature 재계산.
 3. `15_TrajectoryKNN_DTW_RUL`로 Test별 유사 RUL 분포 산출.
 4. `16_ScoreAware_CalibratedEnsemble`로 safe/balanced/aggressive 제출 3종 생성.
+
+---
+
+# v26 Train-Based Update (2026-05-29, 임의 clamp 폐기 후)
+
+> **핵심 전환**: 기존 16_ScoreAware는 EOL gate에서 2400/3600/6000 임의 clamp를 사용 → 챌린지 정신 위반.
+> v26부터 **모든 출력은 train data로 학습된 회귀값**. 600s 물리 하한만 허용. 위 "제출 후보" 표는 deprecated.
+
+## 신규 train-based 메서드
+
+| 메서드 | 방법 | LOBO | Sensitivity mean |
+|--------|------|------|------------------|
+| 17_AsymOptimal | HI-state KNN(K=20) → train RUL 분포 → argmax_p E[A(p,r)] | full 0.520 | 0.401 |
+| 18_PerBearing_Robust | 9 candidate × HI-band grid → 베어링별 best | — | **0.488** |
+| 19_EOLProgression_Robust | HI 곡선 fit + EOL bound cap → progression 역산 | **0.750** | 0.429 |
+| 20_Consensus | 7 candidate median/asym/trimmed/weighted | — | 0.458 |
+| 21_SubmissionMatrix | LOBO vs Sensitivity 통합 (anti-correlated 발견) | — | — |
+| 22_HIVelocity | HI@8.17h → Test5 anomaly 발견 | 0.568 | — |
+| 23_BetaSweep | conservative tilt β=0.95 worst-case 개선 | — | worst 0.40→0.42 |
+| 28_EOLRegressor_Specialist | train rul_s≤15000 GBM+RF+ET 앙상블 | last 0.054 | mid-life robust |
+
+## v26 제출 후보 (현행, 모두 train-based)
+
+| 우선순위 | 파일 | 전략 | Sens / LOBO |
+|----------|------|------|-------------|
+| 1순위 | `artifacts/submissions/HUFS_validation_1순위.xlsx` | 18_PerBearing_Robust | Sens 0.488 |
+| 1순위-cons | `artifacts/submissions/HUFS_validation_1순위_conservative.xlsx` | β=0.95 worst-robust | worst 0.423 |
+| 백업1 | `artifacts/submissions/HUFS_validation_백업1.xlsx` | 5_HIBlend | LOBO 0.712 |
+| 백업2 | `artifacts/submissions/HUFS_validation_백업2.xlsx` | 19_EOLProgression | LOBO 0.750 |
+
+자세한 의사결정: `artifacts/submissions/FINAL_DECISION.md`.
+
+## 핵심 통찰 (v26)
+
+1. **Test5 anomaly**: 동일 8.17h 관측에서 train은 모두 HI~0.5, Test5만 0.944 → train 분포 밖 비정상 빠른 열화 → 짧은 RUL(644s) 정당.
+2. **LOBO ↔ Sensitivity anti-correlation**: LOBO는 train 마지막 600s 라벨에 fit, Sensitivity는 HI-band prior 가정 → 두 관점 모두 robust한 후보가 안전.
+3. **Test3** (HI=0.16): 정상보다 느린 열화 → 긴 RUL(48900s).
+4. **위험 분산**: 1순위(sensitivity prior) / 백업1(LOBO train-fit) / 백업2(EOL physics) 세 독립 가설.
+
+## v27 물리 열화 방법론 (experiments/32_DegradationRate_RUL/) — 신규, train-only
+
+주류 RUL 문헌(블랙박스 DL) 대비 **물리·해석가능** 차별점. HI에 물리 모델을 입혀 RUL 교차검증.
+
+| 메서드 | 핵심 | LOBO progression asym |
+|--------|------|----------------------|
+| 32 DegradationRate (`predict.py`) | `RUL=elapsed×(1−HI)/HI` (평균 열화율, 고장 HI≈1.0) | 0.586 |
+| 33 Convex (`convex_calibrated.py`) | `HI(t)=(t/T)^p` 곡률 보정, LOBO로 p 캘리브 | 0.550 (p≈1 최적 → 이득 無, 단순모델 재확정) |
+| 34 SeverityTwoAxis (`severity_two_axis.py`) | 진행도(HI) × 심각도(energy/rms), 임계=train EOL p90 | (분류) Test5/6 severe, Test1~4 정상 |
+| 35 PhysicsGated (`physics_gated.py`) | severity-gate + avg-rate 단일규칙 | 0.592 (EOL 버킷 거침) |
+| (비교) per-bearing 선택 / HI-prior | 기존 트랙 | 0.519 / 0.508 |
+
+**⚠️ n=4 부트스트랩 (36_bootstrap_lobo_ci.py)**: 4 베어링 복원추출 256표본 95% CI — HI-only [0.37,0.79]·avg-rate [0.52,0.70]·physics-gated [0.49,0.69] **전부 중첩**, P(physics-gated>avg-rate)=0.42. → **방법 간 우열은 n=4 한계로 통계적으로 비결정적**(점추정 "최고"는 표본노이즈 내). 정직 서술: "물리 방법군이 per-bearing(0.52)·HI-prior(0.51)와 **동급~약간 상위**, 결정적 아님".
+
+**핵심 통찰 (v27)**:
+- **2축 건강평가**가 Test5(HI 0.94+energy>EOL)와 Test6(HI 0.41이나 energy 23.3=train EOL 2배 → **숨은 급성 열화**)를 하나의 원리로 통합 → Test6 짧은 RUL 정당화.
+- 독립 물리 모델들이 일관되게 **mid-life(Test1/2/4) 긴 RUL** 지지 → per-bearing 후보 mid-life 과소예측 가능성 (트랙 결정 입력). 상세: `docs/TRACK_RECONCILIATION.md` §9–10.
+- 정직성: 곡률·국소-slope 변형은 LOBO 이득 없어 기각, HI-단독 Test6 오판은 energy 축으로 자체정정, 점추정 우열은 부트스트랩으로 비결정적 인정 → "검증된 단순성 + 정직한 불확실성".

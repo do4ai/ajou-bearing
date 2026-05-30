@@ -1,0 +1,7 @@
+bearing,HI,severe,rul_gated,predB,predA
+Test1,0.602,False,19459,10067,32035
+Test2,0.5,False,29361,10998,33556
+Test3,0.445,False,36626,48900,6449
+Test4,0.448,False,36201,9545,14113
+Test5,0.957,True,5419,644,644
+Test6,0.377,True,5419,10275,3000

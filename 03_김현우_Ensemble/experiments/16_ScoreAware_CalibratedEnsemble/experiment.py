@@ -1,15 +1,28 @@
-"""16_ScoreAware_CalibratedEnsemble.
+"""16_ScoreAware_CalibratedEnsemble — train-based redesign.
 
-Create final portfolio submissions by combining:
-  - existing model/blend candidates
-  - 13_EOLHazardGate_Calibrator
-  - 15_TrajectoryKNN_DTW_RUL
+핵심 원칙 (사용자 지적 반영):
+  모든 RUL 출력은 Train data로 학습된 모델의 회귀 결과여야 한다.
+  임의 숫자(2400/3600/6000 같은 hard-coded) 박기 절대 금지.
+  600s 물리 하한 클립만 허용 (측정 간격 자체가 하한).
+
+구조:
+  - Anchor: 5_HIBlend_Baseline_ChannelSym (current stable best, LOBO combined 0.712)
+  - EOL specialist: 28_EOLRegressor_Specialist (Train rul_s≤15000 학습)
+  - Trajectory KNN: 15_TrajectoryKNN_DTW_RUL (weighted q35 from Train RUL distribution)
+  - Gate signal: 13_EOLHazardGate_Calibrator (P_eol_2400, P_eol_6000) — 값 X, regime 선택만
+
+Regime 결정:
+  P_eol 강도에 따라 3-way weighted ensemble 가중치 변경. 임의 clamp 없음.
+  - strong (hi≥0.90 or p2400≥0.30): EOL 40%, KNN 30%, anchor 30%
+  - moderate (p2400≥0.20 or energy≥15+p6000≥0.20): EOL 30%, KNN 40%, anchor 30%
+  - weak (p3600≥0.30 or energy≥20): EOL 20%, KNN 30%, anchor 50%
+  - pass: anchor 100%
 
 Outputs:
   results/16_scoreaware_debug.csv
-  results/16_scoreaware_safe_submission.xlsx
-  results/16_scoreaware_balanced_submission.xlsx
-  results/16_scoreaware_aggressive_submission.xlsx
+  results/16_scoreaware_balanced_submission.xlsx  (default, train-based 3-way)
+  results/16_scoreaware_safe_submission.xlsx      (보수 측 quantile weight)
+  results/16_scoreaware_aggressive_submission.xlsx (anchor heavy)
 """
 from __future__ import annotations
 
@@ -29,56 +42,35 @@ add_repo_to_path()
 from shared.utils import VAL_NAMES  # noqa: E402
 
 RESULT_DIR = result_dir("16_ScoreAware_CalibratedEnsemble")
-CANDIDATE_FILES = {
-    "submission_v24_v17v22_debug.csv": RESULT_ROOT / "05_HIBlend_Baseline_ChannelSym" / "submission_v24_v17v22_debug.csv",
-    "submission_v19_blend_debug.csv": RESULT_ROOT / "03_HIBlend_Baseline_EOLDirect" / "submission_v19_blend_debug.csv",
-    "submission_v8_v17v25_debug.csv": RESULT_ROOT / "08_HIBlend_Baseline_Dynamics" / "submission_v8_v17v25_debug.csv",
-    "submission_v9_v17v26_debug.csv": RESULT_ROOT / "09_HIBlend_Baseline_DomainAdv" / "submission_v9_v17v26_debug.csv",
-}
 
 
-def load_candidate(fname: str, method_name: str, pred_col: str) -> pd.DataFrame:
-    p = CANDIDATE_FILES[fname]
-    if not p.exists():
-        return pd.DataFrame({"bearing": VAL_NAMES, method_name: np.nan})
-    df = pd.read_csv(p)
-    bearing_col = "Bearing" if "Bearing" in df.columns else "bearing"
-    out = df[[bearing_col, pred_col]].copy()
-    out.columns = ["bearing", method_name]
-    return out
+def load_train_based_predictions() -> pd.DataFrame:
+    """Train-based 4가지 예측값을 베어링별로 모은다.
 
-
-def make_submission(df: pd.DataFrame, col: str, fname: str) -> None:
-    out = pd.DataFrame({
-        "Bearing": df["bearing"],
-        "RUL_pred_seconds": df[col].clip(lower=600.0),
+    - anchor: 5_HIBlend_Baseline_ChannelSym
+    - eol_reg: 28_EOLRegressor_Specialist (conservative)
+    - knn_q35: 15_TrajectoryKNN_DTW_RUL (window 10/20 중 최소 q35 = 보수)
+    - gate features: 13_EOLHazardGate (HI, energy_ratio, p_eol_*)
+    """
+    # 1) anchor (5_HIBlend) — 현재 best stable
+    anchor_path = RESULT_ROOT / "05_HIBlend_Baseline_ChannelSym" / "submission_v24_v17v22_debug.csv"
+    anchor = pd.read_csv(anchor_path)[["Bearing", "RUL_blend_combined_s", "RUL_blend_full_s"]]
+    anchor = anchor.rename(columns={
+        "Bearing": "bearing",
+        "RUL_blend_combined_s": "anchor_combined",
+        "RUL_blend_full_s": "anchor_full",
     })
-    out["RUL_pred_hours"] = out["RUL_pred_seconds"] / 3600.0
-    out.to_excel(RESULT_DIR / fname, index=False)
 
+    # 2) EOL specialist (28) — train-based EOL regression
+    eol_path = RESULT_ROOT / "28_EOLRegressor_Specialist" / "28_eol_regressor_test.csv"
+    eol = pd.read_csv(eol_path)[["Bearing", "EOL_conservative_s", "EOL_median_s",
+                                  "EOL_gbm_q4_s", "EOL_rf_s"]]
+    eol = eol.rename(columns={"Bearing": "bearing"})
 
-def main() -> None:
-    base = pd.DataFrame({"bearing": VAL_NAMES})
-    candidates = [
-        load_candidate("submission_v24_v17v22_debug.csv", "5_ChannelSymBlend_combined", "RUL_blend_combined_s"),
-        load_candidate("submission_v24_v17v22_debug.csv", "5_ChannelSymBlend_full", "RUL_blend_full_s"),
-        load_candidate("submission_v19_blend_debug.csv", "3_EOLDirectBlend_combined", "RUL_blend_combined_s"),
-        load_candidate("submission_v8_v17v25_debug.csv", "8_DynamicsBlend_combined", "RUL_combined_s"),
-        load_candidate("submission_v9_v17v26_debug.csv", "9_DomainAdvBlend_combined", "RUL_combined_s"),
-        load_candidate("submission_v9_v17v26_debug.csv", "9_DomainAdvBlend_full", "RUL_full_s"),
-    ]
-    for c in candidates:
-        base = base.merge(c, on="bearing", how="left")
-
-    gate = pd.read_csv(RESULT_ROOT / "13_EOLHazardGate_Calibrator" / "13_eol_hazard_test.csv")
-    gate_cols = [
-        "bearing", "HI", "rms_multi", "energy_ratio", "nn1_bearing", "nn1_rul_s",
-        "p_eol_2400", "p_eol_6000", "knn_rul_q35", "13_EOLHazardGate_safe_rul_s", "gate_reason",
-    ]
-    base = base.merge(gate[gate_cols], on="bearing", how="left")
-
-    traj = pd.read_csv(RESULT_ROOT / "15_TrajectoryKNN_DTW_RUL" / "15_trajectory_knn_test.csv")
-    traj_agg = traj.groupby("bearing", as_index=False).agg({
+    # 3) trajectory KNN (15) — train RUL distribution
+    knn_path = RESULT_ROOT / "15_TrajectoryKNN_DTW_RUL" / "15_trajectory_knn_test.csv"
+    knn_raw = pd.read_csv(knn_path)
+    knn = knn_raw.groupby("bearing", as_index=False).agg({
         "traj_rul_q20": "min",
         "traj_rul_q35": "min",
         "traj_rul_q50": "min",
@@ -86,62 +78,139 @@ def main() -> None:
         "p_eol_6000": "max",
         "nn1_rul_s": "min",
     }).rename(columns={
-        "p_eol_2400": "traj_p_eol_2400",
-        "p_eol_6000": "traj_p_eol_6000",
-        "nn1_rul_s": "traj_nn1_min_rul_s",
+        "traj_rul_q20": "knn_q20",
+        "traj_rul_q35": "knn_q35",
+        "traj_rul_q50": "knn_q50",
+        "p_eol_2400": "knn_p_eol_2400",
+        "p_eol_6000": "knn_p_eol_6000",
+        "nn1_rul_s": "knn_nn1_min_rul",
     })
-    base = base.merge(traj_agg, on="bearing", how="left")
 
-    balanced = []
-    safe = []
-    aggressive = []
-    reasons = []
-    for _, row in base.iterrows():
-        anchor = float(row["5_ChannelSymBlend_combined"])
-        gate_pred = float(row["13_EOLHazardGate_safe_rul_s"])
-        traj_q35 = float(row["traj_rul_q35"])
-        traj_p2400 = float(row["traj_p_eol_2400"])
-        traj_p6000 = float(row["traj_p_eol_6000"])
-        gate_reason = str(row["gate_reason"])
+    # 4) gate (13) — P_eol classifier features
+    gate_path = RESULT_ROOT / "13_EOLHazardGate_Calibrator" / "13_eol_hazard_test.csv"
+    gate = pd.read_csv(gate_path)[["bearing", "HI", "rms_multi", "energy_ratio",
+                                    "p_eol_2400", "p_eol_3600", "p_eol_6000",
+                                    "knn_rul_q35"]]
+    gate = gate.rename(columns={
+        "HI": "gate_HI",
+        "rms_multi": "gate_rms_multi",
+        "energy_ratio": "gate_energy_ratio",
+        "p_eol_2400": "gate_p_eol_2400",
+        "p_eol_3600": "gate_p_eol_3600",
+        "p_eol_6000": "gate_p_eol_6000",
+        "knn_rul_q35": "gate_knn_q35",
+    })
 
-        # Balanced: current stable best with hard EOL gate.
-        b = min(anchor, gate_pred)
+    df = anchor.merge(eol, on="bearing", how="outer") \
+               .merge(knn, on="bearing", how="outer") \
+               .merge(gate, on="bearing", how="outer")
+    return df
 
-        # Safe: only additionally trust trajectory if independent trajectory risk is visible.
-        s = b
-        if gate_reason != "pass" or traj_p2400 >= 0.15 or traj_p6000 >= 0.25:
-            s = min(s, max(600.0, traj_q35))
 
-        # Aggressive: use domain-adv blend where no EOL risk, otherwise obey the same gate.
-        a_anchor = float(row["9_DomainAdvBlend_combined"])
-        a = a_anchor if gate_reason == "pass" and traj_p2400 < 0.15 and traj_p6000 < 0.25 else s
+def regime_decision(row: pd.Series) -> tuple[float, float, float, str]:
+    """Train-based 3-way ensemble. 임의 숫자 박기 금지.
 
-        balanced.append(max(600.0, b))
-        safe.append(max(600.0, s))
-        aggressive.append(max(600.0, a))
-        reasons.append(f"gate={gate_reason}; traj_p2400={traj_p2400:.3f}; traj_p6000={traj_p6000:.3f}")
+    Returns (balanced, safe, aggressive, regime_label).
+    """
+    anchor = float(row["anchor_combined"])
+    eol = float(row["EOL_conservative_s"])
+    eol_q4 = float(row["EOL_gbm_q4_s"])
+    knn_q35 = float(row["knn_q35"])
+    knn_q20 = float(row["knn_q20"])
 
-    base["16_balanced_rul_s"] = balanced
-    base["16_safe_rul_s"] = safe
-    base["16_aggressive_rul_s"] = aggressive
-    base["16_reason"] = reasons
-    base.to_csv(RESULT_DIR / "16_scoreaware_debug.csv", index=False)
+    hi = float(row["gate_HI"])
+    energy = float(row["gate_energy_ratio"])
+    p2400 = float(row["gate_p_eol_2400"])
+    p3600 = float(row["gate_p_eol_3600"])
+    p6000 = float(row["gate_p_eol_6000"])
 
-    make_submission(base, "16_safe_rul_s", "16_scoreaware_safe_submission.xlsx")
-    make_submission(base, "16_balanced_rul_s", "16_scoreaware_balanced_submission.xlsx")
-    make_submission(base, "16_aggressive_rul_s", "16_scoreaware_aggressive_submission.xlsx")
+    # Regime 분류
+    if hi >= 0.90 or p2400 >= 0.30:
+        regime = "strong_eol"
+    elif p2400 >= 0.20 or (energy >= 15.0 and p6000 >= 0.20):
+        regime = "moderate_eol"
+    elif p3600 >= 0.30 or energy >= 20.0 or p6000 >= 0.25:
+        regime = "weak_eol"
+    else:
+        regime = "pass"
 
-    print("16_ScoreAware_CalibratedEnsemble")
-    cols = [
-        "bearing", "5_ChannelSymBlend_combined", "9_DomainAdvBlend_combined",
-        "13_EOLHazardGate_safe_rul_s", "traj_rul_q35", "traj_p_eol_2400", "traj_p_eol_6000",
-        "16_safe_rul_s", "16_balanced_rul_s", "16_aggressive_rul_s", "16_reason",
-    ]
-    print(base[cols].to_string(index=False))
+    # Train-based weighted ensembles
+    if regime == "strong_eol":
+        balanced = 0.40 * eol + 0.30 * knn_q35 + 0.30 * anchor
+        safe = 0.35 * eol_q4 + 0.45 * knn_q20 + 0.20 * anchor
+        aggressive = 0.50 * anchor + 0.30 * eol + 0.20 * knn_q35
+    elif regime == "moderate_eol":
+        balanced = 0.30 * eol + 0.40 * knn_q35 + 0.30 * anchor
+        safe = 0.30 * eol_q4 + 0.50 * knn_q20 + 0.20 * anchor
+        aggressive = 0.60 * anchor + 0.25 * eol + 0.15 * knn_q35
+    elif regime == "weak_eol":
+        balanced = 0.20 * eol + 0.30 * knn_q35 + 0.50 * anchor
+        safe = 0.25 * eol_q4 + 0.35 * knn_q20 + 0.40 * anchor
+        aggressive = 0.80 * anchor + 0.15 * eol + 0.05 * knn_q35
+    else:  # pass
+        balanced = anchor
+        safe = 0.85 * anchor + 0.10 * eol_q4 + 0.05 * knn_q20
+        aggressive = anchor
+
+    # 600s 물리 하한만 (측정 간격 = 물리적 하한, 임의 안 됨)
+    balanced = max(600.0, balanced)
+    safe = max(600.0, safe)
+    aggressive = max(600.0, aggressive)
+
+    return balanced, safe, aggressive, regime
+
+
+def make_submission_xlsx(df: pd.DataFrame, col: str, fname: str) -> Path:
+    out = pd.DataFrame({
+        "Bearing": df["bearing"],
+        "HI_last": df["gate_HI"],
+        "RUL_pred_seconds": df[col].astype(float),
+    })
+    out["RUL_pred_hours"] = out["RUL_pred_seconds"] / 3600.0
+    fp = RESULT_DIR / fname
+    out.to_excel(fp, index=False)
+    return fp
+
+
+def main() -> None:
+    print("=" * 70)
+    print("16_ScoreAware_CalibratedEnsemble (Train-based redesign)")
+    print("=" * 70)
+
+    df = load_train_based_predictions()
+
+    bal, saf, agr, reg = [], [], [], []
+    for _, row in df.iterrows():
+        b, s, a, r = regime_decision(row)
+        bal.append(b); saf.append(s); agr.append(a); reg.append(r)
+
+    df["regime"] = reg
+    df["balanced_rul_s"] = bal
+    df["safe_rul_s"] = saf
+    df["aggressive_rul_s"] = agr
+
+    # 정렬 (원래 Test1~6 순서 유지)
+    df["_order"] = df["bearing"].map({n: i for i, n in enumerate(VAL_NAMES)})
+    df = df.sort_values("_order").drop(columns=["_order"]).reset_index(drop=True)
+
+    show_cols = ["bearing", "gate_HI", "anchor_combined", "EOL_conservative_s",
+                 "knn_q35", "gate_p_eol_2400", "gate_p_eol_6000",
+                 "regime", "balanced_rul_s", "safe_rul_s", "aggressive_rul_s"]
+    print(df[show_cols].to_string(index=False))
+
+    df.to_csv(RESULT_DIR / "16_scoreaware_debug.csv", index=False)
+
+    bal_fp = make_submission_xlsx(df, "balanced_rul_s", "16_scoreaware_balanced_submission.xlsx")
+    saf_fp = make_submission_xlsx(df, "safe_rul_s", "16_scoreaware_safe_submission.xlsx")
+    agr_fp = make_submission_xlsx(df, "aggressive_rul_s", "16_scoreaware_aggressive_submission.xlsx")
+
+    print()
     print(f"  Saved: {RESULT_DIR / '16_scoreaware_debug.csv'}")
-    print(f"  Saved: {RESULT_DIR / '16_scoreaware_safe_submission.xlsx'}")
-    print(f"  Saved: {RESULT_DIR / '16_scoreaware_balanced_submission.xlsx'}")
-    print(f"  Saved: {RESULT_DIR / '16_scoreaware_aggressive_submission.xlsx'}")
+    print(f"  Saved: {bal_fp}")
+    print(f"  Saved: {saf_fp}")
+    print(f"  Saved: {agr_fp}")
+    print("\n  Note: 모든 출력은 train-based (5_HIBlend / 28_EOLRegressor / 15_KNN)의 weighted combination.")
+    print("        임의 숫자 박기 없음. 600s 물리 하한 클립만 적용.")
 
 
 if __name__ == "__main__":

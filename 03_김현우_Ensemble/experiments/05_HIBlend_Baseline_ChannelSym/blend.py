@@ -17,23 +17,24 @@ os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 os.environ["OMP_NUM_THREADS"] = "1"
 import sys, warnings
 warnings.filterwarnings("ignore")
-ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
-sys.path.insert(0, ROOT)
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from tools.paths import MODEL_ROOT, RESULT_ROOT, add_repo_to_path, result_dir
+add_repo_to_path()
 from shared.utils import asym_score, load_bearing, TRAIN_NAMES, VAL_NAMES, FS, ORDERS
 
 import torch, torch.nn as nn
 import numpy as np, pandas as pd
-from pathlib import Path
 from scipy.signal import butter, filtfilt, hilbert
 from scipy.stats import kurtosis as sp_kurt, skew as sp_skew
 import joblib, matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-METHOD_DIR = Path(__file__).resolve().parent
-MODEL_DIR_V17 = METHOD_DIR / "models"
-MODEL_DIR_V18 = METHOD_DIR / "models_v22"
-RESULT_DIR = METHOD_DIR / "results"
+MODEL_DIR_V17 = MODEL_ROOT / "01_Baseline_1ch_TFTBiLSTM_GPR"
+MODEL_DIR_V18 = MODEL_ROOT / "04_ChannelSym_EOLWeighted"
+RESULT_DIR = result_dir("05_HIBlend_Baseline_ChannelSym")
+TARGET_NAMES = [x.strip() for x in os.environ.get("TARGET_NAMES", "").split(",") if x.strip()] or VAL_NAMES
 
 # ── 피처 추출 — v17 (1채널 31피처) + v18 (4채널 116피처) 따로 ───────────
 def bp(s, lo=1000, hi=6000, fs=FS):
@@ -418,10 +419,10 @@ plt.savefig(RESULT_DIR / "blend_v17v22_LOBO.png", dpi=120); plt.close()
 
 
 # ── 5) Test 추론 ────────────────────────────────────────────────────
-print("\n[6] Test1~6 추론 (블렌드 적용)...", flush=True)
-data_test, _, _ = load_all_features(VAL_NAMES)
+print(f"\n[6] Target 추론 ({', '.join(TARGET_NAMES)})...", flush=True)
+data_test, _, _ = load_all_features(TARGET_NAMES)
 rows_out = []
-for nm in VAL_NAMES:
+for nm in TARGET_NAMES:
     d = data_test[nm]
     # 모든 폴드 모델로 예측 (테스트는 폴드 선택 없이 모든 폴드 ensemble)
     all_p17 = []; all_p18 = []
